@@ -1,0 +1,155 @@
+version: '3.8'
+
+services:
+  # LiteLLM 代理服务器
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm-proxy
+    ports:
+      - "4000:4000"
+    environment:
+      # 主密钥 - 用于认证
+      - LITELLM_MASTER_KEY=${LITELLM_MASTER_KEY:-sk-1234567890}
+
+      # 数据库配置
+      - DATABASE_URL=postgresql://litellm:${POSTGRES_PASSWORD:-litellm_password}@postgres:5432/litellm
+      - STORE_MODEL_IN_DB=True
+
+      # Redis 缓存配置
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+
+      # 模型提供商 API 密钥（根据需要配置）
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - AZURE_API_KEY=${AZURE_API_KEY:-}
+      - AZURE_API_BASE=${AZURE_API_BASE:-}
+      - AZURE_API_VERSION=${AZURE_API_VERSION:-2024-02-15-preview}
+
+      # 日志配置
+      - LITELLM_LOG=INFO
+      - SET_VERBOSE=True
+
+    volumes:
+      # 挂载配置文件（可选）
+      - ./config.yaml:/app/config.yaml
+
+      # 挂载日志目录（可选）
+      - ./logs:/app/logs
+
+    command:
+      - "--config"
+      - "/app/config.yaml"
+      - "--port"
+      - "4000"
+      - "--num_workers"
+      - "4"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+    restart: unless-stopped
+
+    networks:
+      - litellm-network
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL 数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: litellm-postgres
+    environment:
+      - POSTGRES_DB=litellm
+      - POSTGRES_USER=litellm
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-litellm_password}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+    ports:
+      - "5432:5432"
+
+    restart: unless-stopped
+
+    networks:
+      - litellm-network
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis 缓存
+  redis:
+    image: redis:7-alpine
+    container_name: litellm-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-} --appendonly yes
+
+    volumes:
+      - redis-data:/data
+
+    ports:
+      - "6379:6379"
+
+    restart: unless-stopped
+
+    networks:
+      - litellm-network
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+
+networks:
+  litellm-network:
+    driver: bridge
+
+# 使用说明：
+# 1. 创建 .env 文件并配置以下变量：
+#    LITELLM_MASTER_KEY=your-secure-master-key
+#    POSTGRES_PASSWORD=your-postgres-password
+#    REDIS_PASSWORD=your-redis-password
+#    OPENAI_API_KEY=sk-...
+#    ANTHROPIC_API_KEY=sk-ant-...
+#    GEMINI_API_KEY=...
+#
+# 2. 创建 config.yaml 配置文件（参见 config.yaml 示例）
+#
+# 3. 启动服务：
+#    docker-compose up -d
+#
+# 4. 查看日志：
+#    docker-compose logs -f litellm
+#
+# 5. 访问服务：
+#    http://localhost:4000
+#
+# 6. 健康检查：
+#    curl http://localhost:4000/health
+#
+# 7. 停止服务：
+#    docker-compose down
+#
+# 8. 完全清理（包括数据）：
+#    docker-compose down -v
