@@ -60,6 +60,29 @@
 
 ---
 
+> **⚠️ 重要警示：多服务部署时的域名配置**
+>
+> 如果在同一台服务器上部署多个服务（如 V2Ray + CliproxyAPI + New-API），**必须为每个服务使用不同的子域名**。
+>
+> **原因**：每个服务的 Nginx 配置文件路径为 `/usr/local/nginx/conf/conf.d/{域名}.conf`，使用相同域名会导致后安装的服务覆盖先安装服务的 Nginx 配置，造成服务不可用。
+>
+> **正确示例**：
+> - V2Ray: `proxy.example.com` → `conf.d/proxy.example.com.conf`
+> - CliproxyAPI: `api.example.com` → `conf.d/api.example.com.conf`
+> - New-API: `newapi.example.com` → `conf.d/newapi.example.com.conf`
+> - LiteLLM: `litellm.example.com` → `conf.d/litellm.example.com.conf`
+>
+> **错误示例**（会导致配置冲突）：
+> - V2Ray: `example.com`
+> - CliproxyAPI: `example.com` ❌ **会覆盖 V2Ray 的配置！**
+>
+> **注意事项**：
+> - 确保所有子域名都已正确解析到服务器 IP
+> - 可以使用通配符证书（如 `*.example.com`）简化证书管理
+> - 如果不慎覆盖，需要手动恢复被覆盖的 Nginx 配置文件
+
+---
+
 ## 环境要求
 
 ### 支持的操作系统
@@ -596,7 +619,50 @@ dig +short your-domain.com
 netstat -tlnp | grep :80
 ```
 
-### 5. 内存不足
+### 5. 多服务部署后部分服务无法访问
+
+**症状**：先安装的服务（如 V2Ray）被后安装的服务（如 CliproxyAPI）覆盖，导致无法访问。
+
+**原因**：使用了相同的域名安装多个服务，Nginx 配置文件被覆盖。
+
+**解决方案**：
+```bash
+# 1. 查看现有配置
+ls -la /usr/local/nginx/conf/conf.d/
+
+# 2. 为受影响的服务重新安装，使用不同的子域名
+# 例如：V2Ray 用 proxy.example.com，CliproxyAPI 用 api.example.com
+
+# 3. 或者手动合并 Nginx 配置文件
+cat > /usr/local/nginx/conf/conf.d/combined.conf <<'EOF'
+server {
+    listen 443 ssl http2;
+    server_name your-domain.com;
+
+    # SSL 配置
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/key.pem;
+
+    # V2Ray WebSocket 路径
+    location /ws-xxxxxx {
+        proxy_pass http://127.0.0.1:10000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # CliproxyAPI 路径
+    location /v1/ {
+        proxy_pass http://127.0.0.1:8317;
+        # ... 其他配置
+    }
+}
+EOF
+
+systemctl reload nginx
+```
+
+### 6. 内存不足
 
 对于低配 VPS（<1GB），建议：
 - 使用 CliproxyAPI 而非 New-API/LiteLLM
