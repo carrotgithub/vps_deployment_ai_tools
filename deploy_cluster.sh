@@ -42,6 +42,189 @@ CN2_PROXY_INSTALLED=false
 
 # ==================== 辅助函数 ====================
 
+# 修复 Debian/Ubuntu apt 源问题
+fix_apt_sources() {
+    echo -e "${CYAN}>>> 检查并修复 apt 源配置...${NC}"
+
+    # 检测发行版
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO="$ID"
+        VERSION="$VERSION_CODENAME"
+    else
+        echo -e "${YELLOW}无法检测系统发行版，跳过源修复${NC}"
+        return 0
+    fi
+
+    # 针对 Debian 的修复
+    if [ "$DISTRO" = "debian" ]; then
+        echo -e "${DIM}检测到 Debian $VERSION${NC}"
+
+        # 备份原始源文件
+        if [ ! -f /etc/apt/sources.list.bak ]; then
+            cp /etc/apt/sources.list /etc/apt/sources.list.bak 2>/dev/null || true
+        fi
+
+        # 修复 bullseye (Debian 11) 的安全源问题
+        if [ "$VERSION" = "bullseye" ]; then
+            # 旧的安全源路径已变更
+            if grep -q "security.debian.org bullseye/updates" /etc/apt/sources.list 2>/dev/null; then
+                echo -e "${YELLOW}修复 Debian 11 安全源路径...${NC}"
+                sed -i 's|security.debian.org bullseye/updates|security.debian.org/debian-security bullseye-security|g' /etc/apt/sources.list
+            fi
+            if grep -q "security.debian.org/debian bullseye/updates" /etc/apt/sources.list 2>/dev/null; then
+                sed -i 's|security.debian.org/debian bullseye/updates|security.debian.org/debian-security bullseye-security|g' /etc/apt/sources.list
+            fi
+
+            # 移除可能有问题的 backports 源（如果存在问题）
+            if grep -q "bullseye-backports" /etc/apt/sources.list 2>/dev/null; then
+                echo -e "${YELLOW}检查 backports 源...${NC}"
+                # 尝试更新，如果失败则注释掉 backports
+                if ! apt-get update -o Dir::Etc::sourcelist="/dev/null" -o Dir::Etc::sourceparts="/dev/null" 2>&1 | grep -q "bullseye-backports"; then
+                    :
+                fi
+            fi
+        fi
+
+        # 修复 buster (Debian 10) 的问题 - 已移至 archive
+        if [ "$VERSION" = "buster" ]; then
+            if grep -q "deb.debian.org/debian buster" /etc/apt/sources.list 2>/dev/null; then
+                echo -e "${YELLOW}Debian 10 已结束支持，切换到 archive 源...${NC}"
+                sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list
+                sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list
+                # 移除 updates 源（archive 没有）
+                sed -i '/buster-updates/d' /etc/apt/sources.list
+            fi
+        fi
+    fi
+
+    # 针对 Ubuntu 的修复
+    if [ "$DISTRO" = "ubuntu" ]; then
+        echo -e "${DIM}检测到 Ubuntu $VERSION${NC}"
+        # Ubuntu 通常问题较少，这里可以添加特定修复
+    fi
+
+    # 清理并更新
+    echo -e "${DIM}更新软件包列表...${NC}"
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+    if apt-get update -qq 2>/dev/null; then
+        echo -e "${GREEN}✓ apt 源配置正常${NC}"
+        return 0
+    else
+        echo -e "${YELLOW}⚠ apt 更新时有警告，尝试继续...${NC}"
+        # 强制更新，忽略某些错误
+        apt-get update --allow-releaseinfo-change 2>/dev/null || true
+        return 0
+    fi
+}
+
+# 安装 Docker
+ensure_docker() {
+    if command -v docker &> /dev/null; then
+        local docker_version=$(docker --version 2>/dev/null | grep -oP 'Docker version \K[0-9]+\.[0-9]+')
+        echo -e "${GREEN}✓ Docker 已安装 (版本: $docker_version)${NC}"
+
+        # 确保 Docker 服务正在运行
+        if ! systemctl is-active --quiet docker 2>/dev/null; then
+            echo -e "${YELLOW}Docker 服务未运行，正在启动...${NC}"
+            systemctl start docker
+            systemctl enable docker
+        fi
+        return 0
+    fi
+
+    echo -e "${CYAN}>>> 安装 Docker...${NC}"
+    echo ""
+
+    # 先修复 apt 源
+    fix_apt_sources
+
+    # 安装必要的依赖
+    echo -e "${DIM}安装依赖包...${NC}"
+    apt-get install -y -qq ca-certificates curl gnupg lsb-release >/dev/null 2>&1
+
+    # 使用官方安装脚本
+    echo -e "${DIM}下载并运行 Docker 官方安装脚本...${NC}"
+
+    # 尝试使用官方脚本
+    if curl -fsSL https://get.docker.com -o /tmp/get-docker.sh 2>/dev/null; then
+        # 运行安装脚本
+        if sh /tmp/get-docker.sh 2>&1; then
+            rm -f /tmp/get-docker.sh
+
+            # 启动 Docker 服务
+            systemctl start docker
+            systemctl enable docker
+
+            echo -e "${GREEN}✓ Docker 安装成功${NC}"
+            return 0
+        else
+            echo -e "${YELLOW}官方脚本安装失败，尝试手动安装...${NC}"
+            rm -f /tmp/get-docker.sh
+        fi
+    fi
+
+    # 备用方案：手动安装
+    echo -e "${DIM}使用备用安装方式...${NC}"
+
+    # 检测发行版
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+        DISTRO="$ID"
+    fi
+
+    case "$DISTRO" in
+        debian|ubuntu)
+            # 添加 Docker 官方 GPG 密钥
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$DISTRO/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+            chmod a+r /etc/apt/keyrings/docker.gpg
+
+            # 添加 Docker 仓库
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/$DISTRO \
+              $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+              tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+            # 安装 Docker
+            apt-get update -qq
+            apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+        centos|rhel|rocky|almalinux|fedora)
+            # 安装 yum-utils
+            yum install -y yum-utils
+
+            # 添加 Docker 仓库
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+            # 安装 Docker
+            yum install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            ;;
+        *)
+            echo -e "${RED}不支持的发行版: $DISTRO${NC}"
+            echo -e "${YELLOW}请手动安装 Docker: https://docs.docker.com/engine/install/${NC}"
+            return 1
+            ;;
+    esac
+
+    # 启动 Docker 服务
+    systemctl start docker
+    systemctl enable docker
+
+    # 验证安装
+    if command -v docker &> /dev/null; then
+        echo -e "${GREEN}✓ Docker 安装成功${NC}"
+        docker --version
+        return 0
+    else
+        echo -e "${RED}✗ Docker 安装失败${NC}"
+        echo -e "${YELLOW}请手动安装 Docker: https://docs.docker.com/engine/install/${NC}"
+        return 1
+    fi
+}
+
 print_header() {
     clear
     echo -e "${CYAN}"
@@ -145,14 +328,20 @@ install_v2ray() {
     echo "  • 使用 WebSocket + TLS 传输，流量伪装为正常 HTTPS 请求"
     echo "  • 自动生成随机 UUID 和 WebSocket 路径，增强安全性"
     echo "  • 内置静态伪装网站，访问域名显示'系统维护'页面"
-    echo "  • 支持 Let's Encrypt 证书自动申请，失败自动降级为自签名"
+    echo ""
+    echo -e "${CYAN}支持的访问模式:${NC}"
+    echo "  • 域名模式：自动申请 Let's Encrypt 证书（推荐）"
+    echo "  • IP 模式：使用自签名证书，无需域名"
+    echo "  • HTTP 模式：无 SSL 证书，仅限内网/开发环境"
     echo ""
     echo -e "${CYAN}适用场景:${NC}"
     echo "  • 需要部署代理节点用于科学上网"
     echo "  • 希望流量伪装为正常网站访问"
     echo ""
     echo -e "${YELLOW}前置要求:${NC}"
-    echo "  • 需要一个已解析到本服务器的域名（例如: v2.example.com）"
+    echo "  • 域名模式：需要一个已解析到本服务器的域名"
+    echo "  • IP 模式：无需域名，客户端需开启 AllowInsecure"
+    echo "  • HTTP 模式：无需域名或证书，但数据传输不加密"
     echo "  • 确保 80 和 443 端口已开放"
     echo ""
 
@@ -193,6 +382,11 @@ install_cliproxyapi() {
     echo "  • 支持多密钥管理，通过 Web 界面进行配置"
     echo "  • 二进制部署，资源占用极低（适合低配 VPS）"
     echo ""
+    echo -e "${CYAN}支持的访问模式:${NC}"
+    echo "  • 域名模式：自动申请 Let's Encrypt 证书（推荐）"
+    echo "  • IP 模式：使用自签名证书，无需域名"
+    echo "  • HTTP 模式：无 SSL 证书，仅限内网/开发环境"
+    echo ""
     echo -e "${CYAN}适用场景:${NC}"
     echo "  • 需要简单的 AI API 转发功能"
     echo "  • 服务器资源有限（内存 < 1GB）"
@@ -204,7 +398,9 @@ install_cliproxyapi() {
     echo "  • LiteLLM: 100+ 模型支持、负载均衡、成本控制（Docker）"
     echo ""
     echo -e "${YELLOW}前置要求:${NC}"
-    echo "  • 需要一个已解析到本服务器的域名"
+    echo "  • 域名模式：需要一个已解析到本服务器的域名"
+    echo "  • IP 模式：无需域名，浏览器会提示不安全"
+    echo "  • HTTP 模式：无需域名或证书，但数据传输不加密"
     echo "  • 至少准备一个 AI 服务商的 API 密钥"
     echo ""
 
@@ -240,6 +436,11 @@ install_newapi() {
     echo "  • 可视化数据看板，实时统计 API 调用情况"
     echo "  • 支持 Discord、Telegram、OIDC 等多种授权登录方式"
     echo ""
+    echo -e "${CYAN}支持的访问模式:${NC}"
+    echo "  • 域名模式：自动申请 Let's Encrypt 证书（推荐）"
+    echo "  • IP 模式：使用自签名证书，无需域名"
+    echo "  • HTTP 模式：无 SSL 证书，仅限内网/开发环境"
+    echo ""
     echo -e "${CYAN}适用场景:${NC}"
     echo "  • 需要完整的 AI API 管理平台"
     echo "  • 需要用户管理和计费功能"
@@ -256,13 +457,16 @@ install_newapi() {
     echo "  • 需要安装 Docker"
     echo ""
 
-    # 检查 Docker
-    if ! command -v docker &> /dev/null; then
-        echo -e "${YELLOW}⚠ 检测到 Docker 未安装，安装脚本将自动安装 Docker${NC}"
-    fi
-
     if confirm "是否安装 New-API？" "n"; then
         echo ""
+
+        # 确保 Docker 已安装
+        if ! ensure_docker; then
+            echo -e "${RED}Docker 安装失败，无法继续安装 New-API${NC}"
+            wait_key
+            return
+        fi
+
         cd "$SCRIPT_DIR/3.new-api"
         chmod +x install_newapi_docker.sh
         ./install_newapi_docker.sh
@@ -295,6 +499,11 @@ install_litellm() {
     echo "  • Redis 缓存加速，减少重复请求费用"
     echo "  • Prometheus 监控指标，支持成本追踪"
     echo ""
+    echo -e "${CYAN}支持的访问模式:${NC}"
+    echo "  • 域名模式：自动申请 Let's Encrypt 证书（推荐）"
+    echo "  • IP 模式：使用自签名证书，无需域名"
+    echo "  • HTTP 模式：无 SSL 证书，仅限内网/开发环境"
+    echo ""
     echo -e "${CYAN}适用场景:${NC}"
     echo "  • 需要统一多个 AI 服务商的 API"
     echo "  • 需要负载均衡和故障转移能力"
@@ -313,6 +522,14 @@ install_litellm() {
 
     if confirm "是否安装 LiteLLM？" "n"; then
         echo ""
+
+        # 确保 Docker 已安装
+        if ! ensure_docker; then
+            echo -e "${RED}Docker 安装失败，无法继续安装 LiteLLM${NC}"
+            wait_key
+            return
+        fi
+
         cd "$SCRIPT_DIR/4.litellm"
         chmod +x install_litellm_docker.sh
         ./install_litellm_docker.sh
@@ -357,6 +574,11 @@ install_cn2_proxy() {
     echo "  • 在 CN2 VPS 上部署 Nginx 反向代理，转发请求到性能服务器"
     echo "  • 支持 SSL 证书自动申请和配置"
     echo "  • 针对 SSE 流式传输进行优化"
+    echo ""
+    echo -e "${CYAN}支持的访问模式:${NC}"
+    echo "  • 域名模式：自动申请 Let's Encrypt 证书（推荐）"
+    echo "  • IP 模式：使用自签名证书，无需域名（-i 参数）"
+    echo "  • HTTP 模式：无 SSL 证书，仅限内网/开发环境（-h 参数）"
     echo ""
     echo -e "${CYAN}适用场景:${NC}"
     echo "  • 您有一台 CN2 线路的 VPS（国内访问快）"

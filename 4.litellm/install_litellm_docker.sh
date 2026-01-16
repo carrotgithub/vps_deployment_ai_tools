@@ -166,21 +166,72 @@ echo ""
 log_step "[1/8] 环境检查与配置输入"
 echo ""
 
-# 域名输入
-while true; do
-    read -p "请输入 LiteLLM 访问域名（如 litellm.example.com）: " DOMAIN
-    if [[ -z "$DOMAIN" ]]; then
-        log_error "域名不能为空"
-        continue
-    fi
-    if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-        log_error "域名格式不正确"
-        continue
-    fi
-    break
-done
+# 访问方式选择
+echo -e "${CYAN}>>> 请选择访问方式${NC}"
+echo ""
+echo "  1) 使用域名（推荐）- 自动申请 Let's Encrypt 证书"
+echo "  2) 使用 IP 地址   - 自签名证书，浏览器会提示不安全"
+echo "  3) 仅使用 HTTP    - 无 SSL 证书，仅限内网/开发环境"
+echo ""
+read -p "请选择 [1/2/3]: " ACCESS_MODE
 
-log_info "域名: $DOMAIN"
+USE_DOMAIN=true
+USE_HTTP_ONLY=false
+if [ "$ACCESS_MODE" = "2" ]; then
+    USE_DOMAIN=false
+    # 自动获取服务器 IP
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+    echo ""
+    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+        DOMAIN="$SERVER_IP"
+    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+        read -p "请输入 IP 地址: " DOMAIN
+    else
+        DOMAIN="$IP_CONFIRM"
+    fi
+elif [ "$ACCESS_MODE" = "3" ]; then
+    USE_DOMAIN=false
+    USE_HTTP_ONLY=true
+    # 自动获取服务器 IP
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+    echo ""
+    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+    echo -e "${YELLOW}⚠️  HTTP 模式警告：${NC}"
+    echo -e "${YELLOW}   - 数据传输不加密，API Key 可能泄露${NC}"
+    echo -e "${YELLOW}   - 仅建议在内网或开发环境使用${NC}"
+    echo ""
+    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+        DOMAIN="$SERVER_IP"
+    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+        read -p "请输入 IP 地址: " DOMAIN
+    else
+        DOMAIN="$IP_CONFIRM"
+    fi
+else
+    # 域名输入
+    while true; do
+        read -p "请输入 LiteLLM 访问域名（如 litellm.example.com）: " DOMAIN
+        if [[ -z "$DOMAIN" ]]; then
+            log_error "域名不能为空"
+            continue
+        fi
+        if [[ ! "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+            log_error "域名格式不正确"
+            continue
+        fi
+        break
+    done
+fi
+
+if [ -z "$DOMAIN" ]; then
+    log_error "域名/IP 不能为空"
+    exit 1
+fi
+
+log_info "访问地址: $DOMAIN"
 echo ""
 
 # 生成随机密码
@@ -192,17 +243,32 @@ REDIS_PASSWORD=$(generate_password)
 log_success "密码已生成（将保存到信息文件）"
 echo ""
 
-# DNS 配置提示
-SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s http://whatismyip.akamai.com 2>/dev/null || hostname -I | awk '{print $1}')
+# DNS 配置提示 / IP 模式确认
+if [ -z "$SERVER_IP" ]; then
+    SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s http://whatismyip.akamai.com 2>/dev/null || hostname -I | awk '{print $1}')
+fi
 
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "域名:   ${GREEN}$DOMAIN${NC}"
-echo -e "目标IP: ${GREEN}$SERVER_IP${NC}"
-echo ""
-echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
-echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+if [ "$USE_DOMAIN" = true ]; then
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "域名:   ${GREEN}$DOMAIN${NC}"
+    echo -e "目标IP: ${GREEN}$SERVER_IP${NC}"
+    echo ""
+    echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+else
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${YELLOW}⚠️  IP 模式注意事项${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "访问地址: ${GREEN}https://$DOMAIN${NC}"
+    echo ""
+    echo -e "${YELLOW}提示: 将使用自签名证书${NC}"
+    echo -e "${YELLOW}访问时浏览器会提示「不安全」，请点击「高级」→「继续访问」${NC}"
+    echo ""
+    echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+fi
 read
 
 # ==================== 创建目录结构 ====================
@@ -499,7 +565,7 @@ ensure_acme_sh_config() {
 
 # ==================== 配置 Nginx（临时用于 ACME 验证）====================
 
-log_step "[7/8] 配置 Nginx 并申请 SSL 证书..."
+log_step "[7/8] 配置 Nginx 并配置 SSL 证书..."
 
 SSL_DIR="/usr/local/nginx/conf/ssl/$DOMAIN"
 NGINX_CONF="/usr/local/nginx/conf/conf.d/${DOMAIN}.conf"
@@ -508,14 +574,21 @@ CONF_D="/usr/local/nginx/conf/conf.d"
 mkdir -p "$SSL_DIR"
 mkdir -p "$CONF_D"
 
-# 确保 acme.sh 配置正确
-ensure_acme_sh_config "$DOMAIN"
-[ -f ~/.bashrc ] && source ~/.bashrc
+if [ "$USE_HTTP_ONLY" = true ]; then
+    # HTTP 模式：跳过 SSL 证书
+    log_info "HTTP 模式，跳过 SSL 证书配置"
+    SSL_TYPE="无 (HTTP 模式)"
+elif [ "$USE_DOMAIN" = true ]; then
+    # 域名模式：申请 Let's Encrypt 证书
 
-# 先创建临时 Nginx 配置用于 ACME 验证
-log_info "创建临时 Nginx 配置用于证书验证..."
+    # 确保 acme.sh 配置正确
+    ensure_acme_sh_config "$DOMAIN"
+    [ -f ~/.bashrc ] && source ~/.bashrc
 
-cat > "$NGINX_CONF" <<EOF
+    # 先创建临时 Nginx 配置用于 ACME 验证
+    log_info "创建临时 Nginx 配置用于证书验证..."
+
+    cat > "$NGINX_CONF" <<EOF
 # LiteLLM 临时配置（用于 ACME 验证）
 server {
     listen 80;
@@ -533,51 +606,138 @@ server {
 }
 EOF
 
-# 创建 ACME 验证目录
-mkdir -p /var/www/acme
-chmod 755 /var/www/acme
+    # 创建 ACME 验证目录
+    mkdir -p /var/www/acme
+    chmod 755 /var/www/acme
 
-# 重载 Nginx
-if systemctl is-active --quiet nginx 2>/dev/null; then
-    systemctl reload nginx >/dev/null 2>&1
-elif [ -f /usr/local/nginx/sbin/nginx ]; then
-    /usr/local/nginx/sbin/nginx -s reload >/dev/null 2>&1
-fi
+    # 重载 Nginx
+    if systemctl is-active --quiet nginx 2>/dev/null; then
+        systemctl reload nginx >/dev/null 2>&1
+    elif [ -f /usr/local/nginx/sbin/nginx ]; then
+        /usr/local/nginx/sbin/nginx -s reload >/dev/null 2>&1
+    fi
 
-# 申请证书
-log_info "正在申请 Let's Encrypt 证书（ECC-256）..."
-log_info "验证方式: Webroot (/var/www/acme)"
+    # 申请证书
+    log_info "正在申请 Let's Encrypt 证书（ECC-256）..."
+    log_info "验证方式: Webroot (/var/www/acme)"
 
-if ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256; then
-    log_success "证书申请成功"
+    if ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256; then
+        log_success "证书申请成功"
 
-    # 安装证书
-    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-        --key-file "$SSL_DIR/key.pem" \
-        --fullchain-file "$SSL_DIR/fullchain.pem" \
-        --reloadcmd "systemctl reload nginx 2>/dev/null || /usr/local/nginx/sbin/nginx -s reload"
+        # 安装证书
+        ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+            --key-file "$SSL_DIR/key.pem" \
+            --fullchain-file "$SSL_DIR/fullchain.pem" \
+            --reloadcmd "systemctl reload nginx 2>/dev/null || /usr/local/nginx/sbin/nginx -s reload"
 
-    log_success "证书已安装到: $SSL_DIR"
+        log_success "证书已安装到: $SSL_DIR"
+        SSL_TYPE="Let's Encrypt (ECC-256)"
+    else
+        log_warning "Let's Encrypt 证书申请失败，使用自签名证书"
+        log_info "常见原因: DNS 未解析、防火墙阻止、域名被占用"
+
+        # 生成自签名证书
+        openssl req -x509 -nodes -days 365 -newkey ec:<(openssl ecparam -name prime256v1) \
+            -keyout "$SSL_DIR/key.pem" \
+            -out "$SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" 2>/dev/null
+
+        log_info "已生成自签名证书（浏览器会提示不安全）"
+        SSL_TYPE="自签名证书 (Let's Encrypt 申请失败)"
+    fi
 else
-    log_warning "Let's Encrypt 证书申请失败，使用自签名证书"
-    log_info "常见原因: DNS 未解析、防火墙阻止、域名被占用"
+    # IP 模式：生成自签名证书
+    log_info "生成自签名证书 (IP 模式)..."
 
-    # 生成自签名证书
-    openssl req -x509 -nodes -days 365 -newkey ec:<(openssl ecparam -name prime256v1) \
+    # 生成支持 IP 的自签名证书
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
         -keyout "$SSL_DIR/key.pem" \
         -out "$SSL_DIR/fullchain.pem" \
-        -subj "/CN=$DOMAIN" 2>/dev/null
+        -subj "/CN=$DOMAIN" \
+        -addext "subjectAltName=IP:$DOMAIN" >/dev/null 2>&1
 
-    log_info "已生成自签名证书（浏览器会提示不安全）"
-    log_info "可稍后运行以下命令申请正式证书:"
-    log_info "  ~/.acme.sh/acme.sh --issue -d $DOMAIN --webroot /var/www/acme --keylength ec-256"
+    if [ $? -eq 0 ]; then
+        log_success "自签名证书生成成功"
+        SSL_TYPE="自签名证书 (IP 模式)"
+    else
+        # 旧版 OpenSSL 不支持 -addext，使用备用方法
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$SSL_DIR/key.pem" \
+            -out "$SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        log_success "自签名证书生成成功 (兼容模式)"
+        SSL_TYPE="自签名证书 (IP 模式)"
+    fi
 fi
 
 # ==================== 配置 Nginx（正式反向代理）====================
 
 log_step "[8/8] 配置 Nginx 反向代理..."
 
-cat > "$NGINX_CONF" <<EOF
+if [ "$USE_HTTP_ONLY" = true ]; then
+    # HTTP 模式：仅监听 80 端口
+    cat > "$NGINX_CONF" <<EOF
+# LiteLLM 反向代理配置 (HTTP 模式)
+# 自动生成时间: $(date '+%Y-%m-%d %H:%M:%S')
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+
+    # Cloudflare 真实 IP
+    set_real_ip_from 0.0.0.0/0;
+    real_ip_header CF-Connecting-IP;
+
+    # 日志
+    access_log /var/log/nginx/litellm_access.log;
+    error_log /var/log/nginx/litellm_error.log;
+
+    # 反向代理到 LiteLLM
+    location / {
+        proxy_pass http://127.0.0.1:$LITELLM_PORT;
+        proxy_http_version 1.1;
+
+        # WebSocket 支持
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        # 传递真实 IP 和域名
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        # 超时设置（支持长时间流式响应）
+        proxy_connect_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 600s;
+
+        # 关闭缓冲（SSE 支持）
+        proxy_buffering off;
+        proxy_cache off;
+
+        # 允许大文件上传
+        client_max_body_size 100M;
+    }
+
+    # Swagger UI（API 文档）
+    location /docs {
+        proxy_pass http://127.0.0.1:$LITELLM_PORT/docs;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+    }
+
+    # 健康检查端点
+    location /health {
+        proxy_pass http://127.0.0.1:$LITELLM_PORT/health;
+        access_log off;
+    }
+}
+EOF
+else
+    # HTTPS 模式
+    cat > "$NGINX_CONF" <<EOF
 # LiteLLM 反向代理配置
 # 自动生成时间: $(date '+%Y-%m-%d %H:%M:%S')
 
@@ -678,6 +838,7 @@ server {
     }
 }
 EOF
+fi
 
 log_success "Nginx 配置已生成: $NGINX_CONF"
 
@@ -695,14 +856,36 @@ fi
 
 INFO_FILE="$SERVICE_DIR/litellm_info.txt"
 
+# 确定访问模式和协议
+if [ "$USE_HTTP_ONLY" = true ]; then
+    ACCESS_MODE_TEXT="HTTP 模式 (无 SSL)"
+    PROTOCOL="http"
+elif [ "$USE_DOMAIN" = true ]; then
+    ACCESS_MODE_TEXT="域名模式"
+    PROTOCOL="https"
+else
+    ACCESS_MODE_TEXT="IP 模式"
+    PROTOCOL="https"
+fi
+
 cat > "$INFO_FILE" <<EOF
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   LiteLLM Docker 部署信息
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 部署时间: $(date '+%Y-%m-%d %H:%M:%S')
+访问模式: $ACCESS_MODE_TEXT
 服务器IP: $SERVER_IP
-访问域名: https://$DOMAIN
+访问地址: ${PROTOCOL}://$DOMAIN
+证书类型: $SSL_TYPE
+$( [ "$USE_HTTP_ONLY" = true ] && echo "
+⚠️  HTTP 模式注意事项:
+- 数据传输不加密，API Key 可能泄露
+- 仅建议在内网或开发环境使用" )
+$( [ "$USE_HTTP_ONLY" = false ] && [ "$USE_DOMAIN" = false ] && echo "
+⚠️  IP 模式注意事项:
+- 浏览器会提示证书不安全，请点击「高级」→「继续访问」
+- API 客户端可能需要关闭 SSL 验证" )
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   服务配置
@@ -730,15 +913,15 @@ Redis 密码: $REDIS_PASSWORD
   API 访问
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-API 端点: https://$DOMAIN/v1
-Swagger 文档: https://$DOMAIN/
-健康检查: https://$DOMAIN/health
+API 端点: ${PROTOCOL}://$DOMAIN/v1
+Swagger 文档: ${PROTOCOL}://$DOMAIN/
+健康检查: ${PROTOCOL}://$DOMAIN/health
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   OpenAI 兼容 API 示例
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-curl https://$DOMAIN/v1/chat/completions \\
+curl ${PROTOCOL}://$DOMAIN/v1/chat/completions \\
   -H "Authorization: Bearer $MASTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -751,7 +934,7 @@ curl https://$DOMAIN/v1/chat/completions \\
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # 生成虚拟密钥（30天有效，预算100美元）
-curl https://$DOMAIN/key/generate \\
+curl ${PROTOCOL}://$DOMAIN/key/generate \\
   -H "Authorization: Bearer $MASTER_KEY" \\
   -H "Content-Type: application/json" \\
   -d '{
@@ -761,11 +944,11 @@ curl https://$DOMAIN/key/generate \\
   }'
 
 # 查看支出统计
-curl https://$DOMAIN/spend/tags \\
+curl ${PROTOCOL}://$DOMAIN/spend/tags \\
   -H "Authorization: Bearer $MASTER_KEY"
 
 # 列出所有密钥
-curl https://$DOMAIN/key/info \\
+curl ${PROTOCOL}://$DOMAIN/key/info \\
   -H "Authorization: Bearer $MASTER_KEY"
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -860,7 +1043,7 @@ Nginx 配置: $NGINX_CONF
 
 1. 编辑 config.yaml 添加 AI 提供商的 API 密钥
 2. 重启服务使配置生效
-3. 访问 https://$DOMAIN/ 查看 Swagger API 文档
+3. 访问 ${PROTOCOL}://$DOMAIN/ 查看 Swagger API 文档
 4. 生成虚拟密钥供应用使用
 5. 配置监控和日志告警
 
@@ -880,11 +1063,32 @@ echo "       LiteLLM 部署完成！"
 echo "================================================"
 echo -e "${NC}"
 echo ""
+
+# 根据访问模式设置协议
+if [ "$USE_HTTP_ONLY" = true ]; then
+    PROTOCOL="http"
+    ACCESS_MODE_TEXT="HTTP 模式"
+elif [ "$USE_DOMAIN" = true ]; then
+    PROTOCOL="https"
+    ACCESS_MODE_TEXT="域名模式"
+else
+    PROTOCOL="https"
+    ACCESS_MODE_TEXT="IP 模式"
+fi
+
 echo -e "${CYAN}[访问信息]${NC}"
-echo -e "域名:         ${GREEN}https://$DOMAIN${NC}"
-echo -e "API 端点:     ${GREEN}https://$DOMAIN/v1${NC}"
-echo -e "Swagger UI:   ${GREEN}https://$DOMAIN/${NC}"
-echo -e "健康检查:     ${GREEN}https://$DOMAIN/health${NC}"
+echo -e "访问模式:     $ACCESS_MODE_TEXT"
+echo -e "地址:         ${GREEN}${PROTOCOL}://$DOMAIN${NC}"
+echo -e "API 端点:     ${GREEN}${PROTOCOL}://$DOMAIN/v1${NC}"
+echo -e "Swagger UI:   ${GREEN}${PROTOCOL}://$DOMAIN/${NC}"
+echo -e "健康检查:     ${GREEN}${PROTOCOL}://$DOMAIN/health${NC}"
+if [ "$USE_HTTP_ONLY" = true ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️ HTTP 模式: 数据传输不加密，仅建议在内网或开发环境使用${NC}"
+elif [ "$USE_DOMAIN" = false ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️ IP 模式: 浏览器会提示证书不安全，请点击「高级」→「继续访问」${NC}"
+fi
 echo ""
 echo -e "${CYAN}[认证密钥]${NC}"
 echo -e "MASTER_KEY:   ${YELLOW}$MASTER_KEY${NC}"

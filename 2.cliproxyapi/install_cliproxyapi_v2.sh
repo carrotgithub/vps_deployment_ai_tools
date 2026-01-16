@@ -2,20 +2,22 @@
 
 ################################################################################
 #
-# CliproxyAPI 智能安装/升级脚本 v2.0
+# CliproxyAPI 智能安装/升级脚本 v2.1
 #
 # 功能说明：
 #   1. 自动检测是否已安装（智能判断全新安装 or 升级）
 #   2. 全新安装：完整的交互式配置流程
 #   3. 升级模式：保留所有配置，仅更新二进制文件
-#   4. 自动申请 ECC SSL 证书（失败自动降级）
-#   5. 配置 Nginx 反向代理（HTTPS + WebSocket）
-#   6. 配置 Systemd 服务自启动
-#   7. 支持回滚机制
+#   4. 支持域名模式（自动申请 Let's Encrypt 证书）
+#   5. 支持 IP 模式（自签名证书，无需域名）
+#   6. 配置 Nginx 反向代理（HTTPS + WebSocket）
+#   7. 配置 Systemd 服务自启动
+#   8. 支持回滚机制
 #
 # 前置条件：
 #   - 必须先运行 install_nginx.sh
-#   - 域名需要解析到本服务器（全新安装时）
+#   - 域名模式：域名需要解析到本服务器
+#   - IP 模式：无需域名，使用自签名证书
 #
 # 使用场景：
 #   - 全新安装: 首次部署 CliproxyAPI
@@ -124,18 +126,67 @@ fi
 # ==================== 交互输入（仅全新安装） ====================
 
 if [ "$IS_UPGRADE" = false ]; then
-    echo -e "${CYAN}>>> 请输入节点配置信息${NC}"
+    echo -e "${CYAN}>>> 请选择访问方式${NC}"
     echo ""
-    read -p "请输入域名 (例如 api.example.com): " DOMAIN  # 【需替换】替换为你的域名
+    echo "  1) 使用域名（推荐）- 自动申请 Let's Encrypt 证书"
+    echo "  2) 使用 IP 地址   - 自签名证书，无需域名"
+    echo "  3) 仅使用 HTTP    - 无 SSL 证书，仅限内网/开发环境"
+    echo ""
+    read -p "请选择 [1/2/3]: " ACCESS_MODE
 
-    # 域名格式验证
-    if [ -z "$DOMAIN" ]; then
-        log_error "域名不能为空。"
-        exit 1
+    USE_DOMAIN=true
+    USE_HTTP_ONLY=false
+    if [ "$ACCESS_MODE" = "2" ]; then
+        USE_DOMAIN=false
+        # 自动获取服务器 IP
+        SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+        echo ""
+        echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+        read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+        if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+            DOMAIN="$SERVER_IP"
+        elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+            read -p "请输入 IP 地址: " DOMAIN
+        else
+            DOMAIN="$IP_CONFIRM"
+        fi
+    elif [ "$ACCESS_MODE" = "3" ]; then
+        USE_DOMAIN=false
+        USE_HTTP_ONLY=true
+        # 自动获取服务器 IP
+        SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+        echo ""
+        echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+        echo -e "${YELLOW}⚠️  HTTP 模式警告：${NC}"
+        echo -e "${YELLOW}   - 数据传输不加密，API Key 可能泄露${NC}"
+        echo -e "${YELLOW}   - 仅建议在内网或开发环境使用${NC}"
+        echo ""
+        read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+        if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+            DOMAIN="$SERVER_IP"
+        elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+            read -p "请输入 IP 地址: " DOMAIN
+        else
+            DOMAIN="$IP_CONFIRM"
+        fi
+    else
+        echo ""
+        read -p "请输入域名 (例如 api.example.com): " DOMAIN
+
+        # 域名格式验证
+        if [ -z "$DOMAIN" ]; then
+            log_error "域名不能为空。"
+            exit 1
+        fi
+
+        if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+            log_error "域名格式不正确。"
+            exit 1
+        fi
     fi
 
-    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-        log_error "域名格式不正确。"
+    if [ -z "$DOMAIN" ]; then
+        log_error "域名/IP 不能为空。"
         exit 1
     fi
 
@@ -147,15 +198,21 @@ if [ "$IS_UPGRADE" = false ]; then
         exit 1
     fi
 
-    # DNS 配置提示
+    # 配置提示
     SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s http://whatismyip.akamai.com 2>/dev/null || hostname -I | awk '{print $1}')
 
     echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
+    if [ "$USE_HTTP_ONLY" = true ]; then
+        echo -e "${YELLOW}⚠️  HTTP 模式：无 SSL 加密${NC}"
+    elif [ "$USE_DOMAIN" = true ]; then
+        echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
+    else
+        echo -e "${YELLOW}⚠️  IP 模式：将使用自签名证书${NC}"
+    fi
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "域名:   ${GREEN}$DOMAIN${NC}"
-    echo -e "目标IP: ${GREEN}$SERVER_IP${NC}"
+    echo -e "访问地址: ${GREEN}$DOMAIN${NC}"
+    echo -e "服务器IP: ${GREEN}$SERVER_IP${NC}"
     echo ""
     echo -e "${YELLOW}[按回车键继续安装，Ctrl+C 取消]${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -454,18 +511,26 @@ ensure_acme_sh_config() {
 # ==================== 申请 SSL 证书 ====================
 
 if [ "$IS_UPGRADE" = false ] && [ -n "$DOMAIN" ]; then
-    log_step "[5/7] 申请 SSL 证书 (ECC-256)..."
-
-    # 确保 acme.sh 配置正确
-    ensure_acme_sh_config "$DOMAIN"
-    [ -f ~/.bashrc ] && source ~/.bashrc
+    log_step "[5/7] 配置 SSL 证书..."
 
     # 创建证书目录
     DOMAIN_SSL_DIR="$SSL_DIR/$DOMAIN"
     mkdir -p "$DOMAIN_SSL_DIR"
 
-    # 临时 Nginx 配置
-    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
+    if [ "$USE_HTTP_ONLY" = true ]; then
+        # HTTP 模式：跳过 SSL 证书
+        log_info "HTTP 模式，跳过 SSL 证书配置"
+        SSL_TYPE="无 (HTTP 模式)"
+    elif [ "$USE_DOMAIN" = true ]; then
+        # 域名模式：申请 Let's Encrypt 证书
+        log_info "申请 Let's Encrypt ECC 证书..."
+
+        # 确保 acme.sh 配置正确
+        ensure_acme_sh_config "$DOMAIN"
+        [ -f ~/.bashrc ] && source ~/.bashrc
+
+        # 临时 Nginx 配置
+        cat > "$CONF_D/${DOMAIN}.conf" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -475,29 +540,51 @@ server {
 }
 EOF
 
-    mkdir -p /var/www/acme
-    chmod 755 /var/www/acme
-    systemctl reload nginx >/dev/null 2>&1
+        mkdir -p /var/www/acme
+        chmod 755 /var/www/acme
+        systemctl reload nginx >/dev/null 2>&1
 
-    # 申请证书
-    ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
+        # 申请证书
+        ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
 
-    # 安装证书
-    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-        --key-file       "$DOMAIN_SSL_DIR/key.pem" \
-        --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
-        --reloadcmd     "systemctl reload nginx" >/dev/null 2>&1
+        # 安装证书
+        ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+            --key-file       "$DOMAIN_SSL_DIR/key.pem" \
+            --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
+            --reloadcmd     "systemctl reload nginx" >/dev/null 2>&1
 
-    if [ $? -eq 0 ] && [ -f "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
-        log_success "SSL 证书申请成功 (Let's Encrypt)"
-        SSL_TYPE="Let's Encrypt (ECC-256)"
+        if [ $? -eq 0 ] && [ -f "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
+            log_success "SSL 证书申请成功 (Let's Encrypt)"
+            SSL_TYPE="Let's Encrypt (ECC-256)"
+        else
+            log_warning "SSL 申请失败，使用自签名证书..."
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                -keyout "$DOMAIN_SSL_DIR/key.pem" \
+                -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+                -subj "/CN=$DOMAIN" >/dev/null 2>&1
+            SSL_TYPE="自签名证书"
+        fi
     else
-        log_warning "SSL 申请失败，使用自签名证书..."
+        # IP 模式：直接生成自签名证书
+        log_info "生成自签名证书 (IP 模式)..."
+
+        # 生成支持 IP 的自签名证书
         openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
             -keyout "$DOMAIN_SSL_DIR/key.pem" \
             -out "$DOMAIN_SSL_DIR/fullchain.pem" \
-            -subj "/CN=$DOMAIN" >/dev/null 2>&1
-        SSL_TYPE="Self-Signed"
+            -subj "/CN=$DOMAIN" \
+            -addext "subjectAltName=IP:$DOMAIN" >/dev/null 2>&1
+
+        if [ $? -ne 0 ]; then
+            # 旧版 OpenSSL 不支持 -addext，使用备用方法
+            openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+                -keyout "$DOMAIN_SSL_DIR/key.pem" \
+                -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+                -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        fi
+
+        log_success "自签名证书生成成功"
+        SSL_TYPE="自签名证书 (IP 模式)"
     fi
 fi
 
@@ -512,8 +599,100 @@ if [ "$IS_UPGRADE" = false ] && [ -n "$DOMAIN" ]; then
         NGINX_SUPPORTS_HTTP3=true
     fi
 
-    # 生成完整 Nginx 配置（从原脚本复制配置模板）
-    if [ "$NGINX_SUPPORTS_HTTP3" = true ]; then
+    if [ "$USE_HTTP_ONLY" = true ]; then
+        # HTTP 模式：仅监听 80 端口
+        cat > "$CONF_D/${DOMAIN}.conf" <<'EOF_NGINX_HTTP'
+server {
+    listen 80;
+
+    server_name DOMAIN_PLACEHOLDER;
+
+    client_max_body_size 100m;
+    tcp_nodelay on;
+
+    access_log /var/log/nginx/cliproxyapi_access.log;
+    error_log /var/log/nginx/cliproxyapi_error.log warn;
+
+    #CLI-PROXY-API-START
+
+    # WebSocket
+    location /v1/ws {
+        proxy_pass http://127.0.0.1:CLIPROXY_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+
+    # OpenAI SSE - Chat Completions
+    location /v1/chat/completions {
+        proxy_pass http://127.0.0.1:CLIPROXY_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Connection "";
+        proxy_set_header Accept-Encoding "";
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        add_header X-Accel-Buffering no always;
+        gzip off;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+        chunked_transfer_encoding on;
+    }
+
+    # 其他 v1 API
+    location /v1/ {
+        proxy_pass http://127.0.0.1:CLIPROXY_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+    }
+
+    # v0 管理接口
+    location /v0/ {
+        proxy_pass http://127.0.0.1:CLIPROXY_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 60;
+    }
+
+    # 默认
+    location / {
+        proxy_pass http://127.0.0.1:CLIPROXY_PORT_PLACEHOLDER;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 3600;
+        proxy_send_timeout 3600;
+    }
+
+    #CLI-PROXY-API-END
+}
+EOF_NGINX_HTTP
+
+        # 替换占位符
+        sed -i "s|DOMAIN_PLACEHOLDER|$DOMAIN|g" "$CONF_D/${DOMAIN}.conf"
+        sed -i "s|CLIPROXY_PORT_PLACEHOLDER|$CLIPROXY_PORT|g" "$CONF_D/${DOMAIN}.conf"
+
+    elif [ "$NGINX_SUPPORTS_HTTP3" = true ]; then
         # 使用 HTTP/3 配置（394-570行的配置）
         cat > "$CONF_D/${DOMAIN}.conf" <<'EOF_NGINX'
 server {
@@ -835,23 +1014,44 @@ EOF
     echo -e "数据目录:   已保留"
     echo -e "备份位置:   $BACKUP_DIR"
 else
+    # 确定访问模式显示文本
+    if [ "$USE_HTTP_ONLY" = true ]; then
+        ACCESS_MODE_TEXT="HTTP 模式 (无 SSL)"
+        PROTOCOL="http"
+    elif [ "$USE_DOMAIN" = true ]; then
+        ACCESS_MODE_TEXT="域名模式"
+        PROTOCOL="https"
+    else
+        ACCESS_MODE_TEXT="IP 模式"
+        PROTOCOL="https"
+    fi
+
     cat <<EOF
 ================================================
        CliproxyAPI 安装成功！
 ================================================
+访问模式:  $ACCESS_MODE_TEXT
 服务器 IP: $(curl -s https://api.ipify.org 2>/dev/null || echo "N/A")
-域名:      $DOMAIN
+访问地址:  $DOMAIN
 
 [访问地址]
-HTTPS:     https://$DOMAIN
-管理界面:  https://$DOMAIN/management.html
+$( [ "$USE_HTTP_ONLY" = true ] && echo "HTTP:      http://$DOMAIN" || echo "HTTPS:     https://$DOMAIN" )
+管理界面:  ${PROTOCOL}://$DOMAIN/management.html
+$( [ "$USE_HTTP_ONLY" = true ] && echo "
+⚠️  HTTP 模式注意事项:
+- 数据传输不加密，API Key 可能泄露
+- 仅建议在内网或开发环境使用" )
+$( [ "$USE_HTTP_ONLY" = false ] && [ "$USE_DOMAIN" = false ] && echo "
+⚠️  IP 模式注意事项:
+- 浏览器会提示证书不安全，请点击「高级」→「继续访问」
+- API 客户端需要关闭 SSL 验证或信任自签名证书" )
 
 [API 密钥]
 密钥 1:    $API_KEY_1
 密钥 2:    $API_KEY_2
 
 [管理面板]
-访问地址:  https://$DOMAIN/management.html
+访问地址:  ${PROTOCOL}://$DOMAIN/management.html
 登录密码:  $ADMIN_SECRET
 
 [配置信息]

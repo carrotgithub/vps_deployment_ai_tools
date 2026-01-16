@@ -145,7 +145,12 @@ cd "0.nginx部署（1.28.1 HTTP3）"
 
 ---
 
-### 第三步：CN2 VPS 申请 SSL 证书
+### 第三步：CN2 VPS 配置 SSL 证书
+
+脚本支持三种模式：
+- **域名模式**：自动申请 Let's Encrypt 证书（推荐）
+- **IP 模式**：使用自签名证书，无需域名
+- **HTTP 模式**：无 SSL 证书，仅限内网/开发环境
 
 ```bash
 cd "5.cn2-vps反向代理"
@@ -153,22 +158,39 @@ cd "5.cn2-vps反向代理"
 # 赋予执行权限
 chmod +x apply_ssl_cn2.sh
 
-# 申请证书
+# 域名模式（推荐）
 ./apply_ssl_cn2.sh -d newapi.tunecoder.example.com
+
+# IP 模式（无需域名）
+./apply_ssl_cn2.sh -i 1.2.3.4
+
+# HTTP 模式（无 SSL）
+./apply_ssl_cn2.sh -h 1.2.3.4
 ```
 
 **脚本会自动：**
-1. 检查并修复 acme.sh 邮箱配置（使用 admin@tunecoder.example.com）
-2. 创建临时 Nginx 配置用于 ACME 验证
-3. 申请 Let's Encrypt ECC-256 证书
-4. 失败时自动降级到自签名证书
+1. 域名模式：检查并修复 acme.sh 邮箱配置
+2. 域名模式：创建临时 Nginx 配置用于 ACME 验证
+3. 域名模式：申请 Let's Encrypt ECC-256 证书
+4. IP 模式：直接生成自签名证书（10年有效期）
+5. HTTP 模式：跳过 SSL 证书配置
+6. 失败时自动降级到自签名证书
 
 **成功后会看到：**
 ```
-✓ SSL 证书申请完成！
-证书类型: Let's Encrypt (ECC-256)
+✓ SSL 证书配置完成！
+访问模式: 域名模式/IP 模式/HTTP 模式
+证书类型: Let's Encrypt (ECC-256) 或 自签名证书 (IP 模式) 或 无 (HTTP 模式)
 证书路径: /usr/local/nginx/conf/ssl/newapi.tunecoder.example.com/
 ```
+
+**IP 模式注意事项：**
+- 浏览器会提示「不安全」，请点击「高级」→「继续访问」
+- API 客户端可能需要关闭 SSL 验证
+
+**HTTP 模式注意事项：**
+- 数据传输不加密，API Key 可能泄露
+- 仅建议在内网或开发环境使用
 
 ---
 

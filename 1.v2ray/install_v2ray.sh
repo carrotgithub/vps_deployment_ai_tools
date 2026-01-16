@@ -6,13 +6,15 @@
 #
 # 功能说明：
 #   1. 安装 V2Ray 核心
-#   2. 自动申请 ECC SSL 证书 (更小更快)
-#   3. 生成 Nginx 单域名配置 (支持 WebSocket + TLS)
-#   4. 预留 API 转发入口
+#   2. 支持域名模式（自动申请 Let's Encrypt ECC 证书）
+#   3. 支持 IP 模式（使用自签名证书，无需域名）
+#   4. 生成 Nginx 配置 (支持 WebSocket + TLS)
+#   5. 预留 API 转发入口
 #
 # 前置条件：
 #   - 必须先运行 install_nginx.sh
-#   - 域名必须已经解析到本服务器
+#   - 域名模式：域名需要解析到本服务器
+#   - IP 模式：无需域名，客户端需开启 AllowInsecure
 #
 ################################################################################
 
@@ -43,12 +45,56 @@ if [ ! -d "$NGINX_PATH" ]; then
 fi
 
 # ==================== 1. 交互输入 ====================
-echo -e "${CYAN}>>> 请输入节点配置信息${NC}"
+echo -e "${CYAN}>>> 请选择访问方式${NC}"
 echo ""
-read -p "请输入域名 (例如 v2.example.com): " DOMAIN
+echo "  1) 使用域名（推荐）- 自动申请 Let's Encrypt 证书"
+echo "  2) 使用 IP 地址   - 自签名证书，客户端需开启 AllowInsecure"
+echo "  3) 仅使用 HTTP    - 无 SSL 证书，仅限内网/开发环境"
+echo ""
+read -p "请选择 [1/2/3]: " ACCESS_MODE
+
+USE_DOMAIN=true
+USE_HTTP_ONLY=false
+if [ "$ACCESS_MODE" = "2" ]; then
+    USE_DOMAIN=false
+    # 自动获取服务器 IP
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+    echo ""
+    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+        DOMAIN="$SERVER_IP"
+    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+        read -p "请输入 IP 地址: " DOMAIN
+    else
+        DOMAIN="$IP_CONFIRM"
+    fi
+elif [ "$ACCESS_MODE" = "3" ]; then
+    USE_DOMAIN=false
+    USE_HTTP_ONLY=true
+    # 自动获取服务器 IP
+    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+    echo ""
+    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+    echo -e "${YELLOW}⚠️  HTTP 模式警告：${NC}"
+    echo -e "${YELLOW}   - 数据传输不加密，API Key 可能泄露${NC}"
+    echo -e "${YELLOW}   - 仅建议在内网或开发环境使用${NC}"
+    echo ""
+    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
+    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
+        DOMAIN="$SERVER_IP"
+    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
+        read -p "请输入 IP 地址: " DOMAIN
+    else
+        DOMAIN="$IP_CONFIRM"
+    fi
+else
+    echo ""
+    read -p "请输入域名 (例如 v2.example.com): " DOMAIN
+fi
 
 if [ -z "$DOMAIN" ]; then
-    echo -e "${RED}错误: 域名不能为空。${NC}"
+    echo -e "${RED}错误: 域名/IP 不能为空。${NC}"
     exit 1
 fi
 
@@ -58,7 +104,8 @@ WS_PATH="/ws-$(cat /dev/urandom | tr -dc 'a-z0-9' | head -c 8)"
 
 echo ""
 echo -e "配置预览:"
-echo -e "域名: ${GREEN}$DOMAIN${NC}"
+echo -e "访问方式: ${GREEN}$( [ "$USE_HTTP_ONLY" = true ] && echo "HTTP 模式 (无 SSL)" || ( [ "$USE_DOMAIN" = true ] && echo "域名模式" || echo "IP 模式 (自签名证书)" ) )${NC}"
+echo -e "地址: ${GREEN}$DOMAIN${NC}"
 echo -e "UUID: ${GREEN}$UUID${NC}"
 echo -e "路径: ${GREEN}$WS_PATH${NC}"
 echo ""
@@ -138,19 +185,28 @@ ensure_acme_sh_config() {
     fi
 }
 
-# ==================== 3. 申请 SSL 证书 (ECC) ====================
-echo -e "${CYAN}>>> [3/4] 申请 SSL 证书 (ECC)...${NC}"
-
-# 确保 acme.sh 配置正确
-ensure_acme_sh_config "$DOMAIN"
-[ -f ~/.bashrc ] && source ~/.bashrc
+# ==================== 3. 申请 SSL 证书 ====================
+echo -e "${CYAN}>>> [3/4] 配置 SSL 证书...${NC}"
 
 # 创建证书存放目录
 DOMAIN_SSL_DIR="$SSL_DIR/$DOMAIN"
 mkdir -p "$DOMAIN_SSL_DIR"
 
-# 临时 Nginx 配置用于验证
-cat > "$CONF_D/${DOMAIN}.conf" <<EOF
+if [ "$USE_HTTP_ONLY" = true ]; then
+    # HTTP 模式：跳过 SSL 证书
+    echo -e "${YELLOW}>>> HTTP 模式，跳过 SSL 证书配置${NC}"
+    SSL_OK=false
+    CERT_TYPE="无 (HTTP 模式)"
+elif [ "$USE_DOMAIN" = true ]; then
+    # 域名模式：申请 Let's Encrypt 证书
+    echo -e "${CYAN}>>> 申请 Let's Encrypt ECC 证书...${NC}"
+
+    # 确保 acme.sh 配置正确
+    ensure_acme_sh_config "$DOMAIN"
+    [ -f ~/.bashrc ] && source ~/.bashrc
+
+    # 临时 Nginx 配置用于验证
+    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -159,29 +215,56 @@ server {
     }
 }
 EOF
-mkdir -p /var/www/acme
-chmod 755 /var/www/acme
-systemctl reload nginx
+    mkdir -p /var/www/acme
+    chmod 755 /var/www/acme
+    systemctl reload nginx
 
-# 申请证书 (ECC 256)
-~/.acme.sh/acme.sh --issue -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
+    # 申请证书 (ECC 256)
+    ~/.acme.sh/acme.sh --issue -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
 
-# 安装证书
-~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-    --key-file       "$DOMAIN_SSL_DIR/key.pem" \
-    --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
-    --reloadcmd     "systemctl reload nginx"
+    # 安装证书
+    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+        --key-file       "$DOMAIN_SSL_DIR/key.pem" \
+        --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
+        --reloadcmd     "systemctl reload nginx"
 
-if [ $? -eq 0 ] && [ -f "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
-    echo -e "${GREEN}✓ SSL 证书申请成功 (ECC)${NC}"
-    SSL_OK=true
+    if [ $? -eq 0 ] && [ -f "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
+        echo -e "${GREEN}✓ SSL 证书申请成功 (ECC)${NC}"
+        SSL_OK=true
+        CERT_TYPE="Let's Encrypt ECC"
+    else
+        echo -e "${YELLOW}⚠ SSL 申请失败，降级为自签名证书...${NC}"
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$DOMAIN_SSL_DIR/key.pem" \
+            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        SSL_OK=false
+        CERT_TYPE="自签名证书"
+    fi
 else
-    echo -e "${YELLOW}⚠ SSL 申请失败，降级为自签名证书...${NC}"
+    # IP 模式：直接生成自签名证书
+    echo -e "${CYAN}>>> 生成自签名证书 (IP 模式)...${NC}"
+
+    # 生成支持 IP 的自签名证书
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
         -keyout "$DOMAIN_SSL_DIR/key.pem" \
         -out "$DOMAIN_SSL_DIR/fullchain.pem" \
-        -subj "/CN=$DOMAIN" >/dev/null 2>&1
-    SSL_OK=false
+        -subj "/CN=$DOMAIN" \
+        -addext "subjectAltName=IP:$DOMAIN" >/dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}✓ 自签名证书生成成功${NC}"
+        SSL_OK=false
+        CERT_TYPE="自签名证书 (IP 模式)"
+    else
+        # 旧版 OpenSSL 不支持 -addext，使用备用方法
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$DOMAIN_SSL_DIR/key.pem" \
+            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        SSL_OK=false
+        CERT_TYPE="自签名证书 (IP 模式)"
+    fi
 fi
 
 # ==================== 4. 配置 Nginx 最终版 ====================
@@ -217,7 +300,46 @@ CF_CONF_BLOCK=" \
     real_ip_header CF-Connecting-IP;
 "
 
-cat > "$CONF_D/${DOMAIN}.conf" <<EOF
+if [ "$USE_HTTP_ONLY" = true ]; then
+    # HTTP 模式：仅监听 80 端口
+    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+
+    root $WEB_ROOT;
+    index index.html;
+
+    # 1. 静态伪装站 (默认访问路径)
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+
+    # 2. V2Ray 代理路径
+    location $WS_PATH {
+        proxy_redirect off;
+        proxy_pass http://127.0.0.1:$V2RAY_PORT;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+
+        # 传递真实 IP 给 V2Ray
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    }
+
+    # 3. [扩展预留] API 转发示例
+    # location /api/ {
+    #     proxy_pass http://YOUR_BACKEND_IP:PORT;
+    #     proxy_set_header Host \$host;
+    #     proxy_set_header X-Real-IP \$remote_addr;
+    # }
+}
+EOF
+else
+    # HTTPS 模式（域名模式或 IP 模式）
+    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
 server {
     listen 80;
     server_name $DOMAIN;
@@ -273,6 +395,7 @@ server {
     # }
 }
 EOF
+fi
 
 systemctl reload nginx
 
@@ -280,28 +403,48 @@ systemctl reload nginx
 IP=$(curl -s https://api.ipify.org || hostname -I | awk '{print $1}')
 INFO_FILE="$(dirname "$0")/v2ray_node_info.txt"
 
+# 确定访问模式显示文本
+if [ "$USE_HTTP_ONLY" = true ]; then
+    ACCESS_MODE_TEXT="HTTP 模式 (无 SSL)"
+    PORT_TEXT="80"
+    TLS_TEXT="关闭"
+elif [ "$USE_DOMAIN" = true ]; then
+    ACCESS_MODE_TEXT="域名模式"
+    PORT_TEXT="443"
+    TLS_TEXT="开启 (tls)"
+else
+    ACCESS_MODE_TEXT="IP 模式"
+    PORT_TEXT="443"
+    TLS_TEXT="开启 (tls)"
+fi
+
 cat > "$INFO_FILE" <<EOF
 ================================================
-          V2Ray 节点配置完成 (v3.0)
+          V2Ray 节点配置完成 (v3.2)
 ================================================
+访问模式: $ACCESS_MODE_TEXT
 服务器 IP: $IP
-域名:      $DOMAIN
+$( [ "$USE_DOMAIN" = true ] && echo "域名:      $DOMAIN" || echo "访问地址:  $DOMAIN" )
 
 [连接参数]
 协议:      VMess
 地址:      $DOMAIN
-端口:      443
+端口:      $PORT_TEXT
 UUID:      $UUID
 传输:      ws (WebSocket)
 路径:      $WS_PATH
-TLS:       开启 (tls)
+TLS:       $TLS_TEXT
 
 [注意事项]
-1. 证书类型: $( [ "$SSL_OK" = true ] && echo "ECC (Let's Encrypt)" || echo "自签名 (请开启 AllowInsecure)" )
-2. Cloudflare: 
+1. 证书类型: $CERT_TYPE
+$( [ "$USE_HTTP_ONLY" = true ] && echo "2. HTTP 模式警告:
+   - 数据传输不加密，仅建议在内网或开发环境使用
+   - 客户端 TLS 设置需选择「关闭」或「none」" )
+$( [ "$USE_HTTP_ONLY" = false ] && [ "$USE_DOMAIN" = false ] && echo "2. IP 模式: 客户端必须开启「允许不安全连接」(AllowInsecure)" )
+$( [ "$USE_DOMAIN" = true ] && echo "2. Cloudflare:
    - 追求速度: 请在 CF 后台开启【灰色云朵】(直连)
    - 追求隐匿: 请开启【橙色云朵】(CDN代理)
-   - 此配置兼容两种模式
+   - 此配置兼容两种模式" )
 
 [扩展指南]
 如果需要添加 API 站点，请在 $CONF_D 下新建 .conf 文件
