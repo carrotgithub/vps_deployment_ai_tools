@@ -219,7 +219,15 @@ if [ "$IS_UPGRADE" = false ]; then
     read
 else
     # 升级模式：从现有配置读取域名
-    EXISTING_CONF=$(find "$CONF_D" -name "*.conf" -type f | grep -v default | head -1)
+    # 查找包含 cliproxyapi 标识的 Nginx 配置文件
+    EXISTING_CONF=""
+    for conf_file in "$CONF_D"/*.conf; do
+        if [ -f "$conf_file" ] && grep -q "CLI-PROXY-API-START" "$conf_file" 2>/dev/null; then
+            EXISTING_CONF="$conf_file"
+            break
+        fi
+    done
+
     if [ -n "$EXISTING_CONF" ]; then
         DOMAIN=$(grep "server_name" "$EXISTING_CONF" | head -1 | awk '{print $2}' | sed 's/;//g')
         log_info "检测到现有域名: $DOMAIN"
