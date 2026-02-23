@@ -50,12 +50,12 @@
                     │          【基础设施层 - 必须先部署】        │
                     └────────────────────┬────────────────────┘
                                          │
-        ┌────────────────┬───────────────┼───────────────┬────────────────┐
-        ▼                ▼               ▼               ▼                ▼
-   ┌─────────┐    ┌───────────┐   ┌──────────┐   ┌──────────┐    ┌─────────────┐
-   │ V2Ray   │    │CliproxyAPI│   │ New-API  │   │ LiteLLM  │    │ CN2反向代理  │
-   │ 节点    │    │  API转发   │   │ AI网关   │   │ LLM代理  │    │   优化      │
-   └─────────┘    └───────────┘   └──────────┘   └──────────┘    └─────────────┘
+                    ┌────────────────────┼────────────────────┐
+                    ▼                    ▼                    ▼
+              ┌─────────┐        ┌───────────┐        ┌──────────┐
+              │ V2Ray   │        │CliproxyAPI│        │ New-API  │
+              │ 节点    │        │  API转发   │        │ AI网关   │
+              └─────────┘        └───────────┘        └──────────┘
 ```
 
 所有后续服务都依赖本脚本提供的：
@@ -226,7 +226,7 @@ net.core.somaxconn = 32768        # 连接队列大小
 
 ### 关键模块用途
 
-**Stream 模块系列**（用于 7.多cn2协同-nginx负载均衡）：
+**Stream 模块系列**（用于 TCP/UDP 四层代理）：
 ```nginx
 stream {
     upstream cn2_backends {
@@ -314,7 +314,7 @@ cat /etc/logrotate.d/nginx
 │   ├── mime.types         # MIME 类型
 │   ├── conf.d/            # 【扩展配置目录】- 后续服务配置存放位置
 │   │   ├── api.example.com.conf
-│   │   ├── litellm.example.com.conf
+│   │   ├── newapi.example.com.conf
 │   │   └── ...
 │   └── ssl/               # 【SSL 证书目录】
 │       ├── api.example.com/
@@ -434,11 +434,10 @@ Nginx 部署完成后，可以继续部署以下服务：
 
 | 序号 | 服务 | 用途 | 部署命令 |
 |------|------|------|---------|
-| 1 | V2Ray 节点 | 代理服务 | `cd ../1.v2ray节点部署 && ./install_v2ray.sh` |
+| 01 | Docker | 容器运行环境 | `cd ../01.docker && ./install_docker.sh` |
+| 1 | V2Ray 节点 | 代理服务 | `cd ../1.v2ray && ./install_v2ray.sh` |
 | 2 | CliproxyAPI | AI API 转发 | `cd ../2.cliproxyapi && ./install_cliproxyapi_v2.sh` |
 | 3 | New-API | AI 模型网关 | `cd ../3.new-api && ./install_newapi_docker.sh` |
-| 4 | LiteLLM | LLM 统一代理 | `cd ../4.litellm && ./install_litellm_docker.sh` |
-| 5 | CN2 反向代理 | 网络优化 | `cd ../5.cn2-vps反向代理 && ./apply_ssl_cn2.sh` |
 
 **完整部署流程**: 请参考根目录的 `deploy_cluster.sh` 脚本进行引导式部署。
 

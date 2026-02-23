@@ -108,11 +108,26 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-# 检查 Docker
+# 检查 Docker，未安装则尝试自动安装
 if ! command -v docker &> /dev/null; then
-    log_error "未检测到 Docker，请先安装 Docker。"
-    log_info "安装命令: curl -fsSL https://get.docker.com | sh"
-    exit 1
+    log_warning "未检测到 Docker，尝试自动安装..."
+
+    # 定位 Docker 安装脚本
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    DOCKER_INSTALLER="$SCRIPT_DIR/../01.docker/install_docker.sh"
+
+    if [ -f "$DOCKER_INSTALLER" ]; then
+        source "$DOCKER_INSTALLER"
+        if ! ensure_docker; then
+            log_error "Docker 自动安装失败，请手动安装。"
+            log_info "安装命令: curl -fsSL https://get.docker.com | sh"
+            exit 1
+        fi
+    else
+        log_error "未找到 Docker 安装脚本: $DOCKER_INSTALLER"
+        log_info "安装命令: curl -fsSL https://get.docker.com | sh"
+        exit 1
+    fi
 fi
 
 # 检查 docker-compose
