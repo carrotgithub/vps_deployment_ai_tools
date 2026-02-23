@@ -43,7 +43,7 @@
 
 - **Root 权限**: 所有脚本需要 root 用户执行
 - **网络连接**: 需要访问 GitHub、Docker Hub 等
-- **域名（可选）**: 申请 SSL 证书需要已解析的域名；也支持 IP 模式（自签名证书）和 HTTP 模式
+- **域名（可选）**: 申请 SSL 证书需要已解析的域名（[Cloudflare DNS 配置指南](docs/cloudflare-dns-guide.md)）；也支持 IP 模式（自签名证书）和 HTTP 模式
 - **端口开放**: 80 (HTTP), 443 (HTTPS)
 
 ---
@@ -78,6 +78,9 @@ cd 3.new-api && ./install_newapi_docker.sh
 vps_deployment_ai_tools/
 ├── deploy_cluster.sh              # 全流程部署引导脚本
 ├── README.md                      # 本文档
+│
+├── docs/                          # 辅助文档
+│   └── cloudflare-dns-guide.md    # Cloudflare DNS 配置指南
 │
 ├── 0.nginx/                       # Nginx 基础设施（必选）
 │   ├── install_nginx.sh
