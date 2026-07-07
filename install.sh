@@ -3,15 +3,17 @@
 # shellcheck disable=SC2034
 ################################################################################
 #
-# 洪哥的 AI 工具箱 — 一键部署脚本
+# HongBox（洪盒）— AI 原生服务器部署工具
 # 版本: v4.0.0
 #
 # 功能说明：
-#   引导用户选择并安装 AI 工具集群，自动处理依赖关系
+#   通过 plan/preflight/apply/status/doctor 命令部署 AI 工具集群
 #
 # 使用方法：
 #   chmod +x install.sh
-#   sudo ./install.sh              # 交互式部署（推荐）
+#   ./install.sh plan --services new-api --domain api.example.com
+#   ./install.sh preflight --profile deploy.env
+#   sudo ./install.sh apply --profile deploy.env --yes
 #   ./install.sh -h                # 显示帮助
 #   ./install.sh --version         # 显示版本
 #
@@ -36,15 +38,23 @@ readonly HONGAIBOX_REPO="YoungHong1992/hong-ai-box"
 
 show_bootstrap_help() {
     cat <<EOF
-洪哥的 AI 工具箱 v${VERSION} — 一键部署脚本
+HongBox v${VERSION} — AI-native server deployment toolkit
 
 用法:
-  ./install.sh              # 交互式部署
-  ./install.sh -h           # 显示此帮助
-  ./install.sh --version    # 显示版本
+  ./install.sh plan --services new-api --domain api.example.com
+  ./install.sh preflight --profile deploy.env
+  sudo ./install.sh apply --profile deploy.env --yes
+  ./install.sh status
+  ./install.sh doctor --profile deploy.env
+  ./install.sh -h
+  ./install.sh --version
 
 远程安装:
-  curl -fsSL https://raw.githubusercontent.com/${HONGAIBOX_REPO}/main/install.sh | sudo bash
+  curl -fsSL https://raw.githubusercontent.com/${HONGAIBOX_REPO}/main/install.sh | bash
+
+说明:
+  无参数运行只显示帮助，不进入终端菜单。请让 AI agent 先生成 plan/preflight，
+  人工确认后再执行 apply --yes。
 EOF
 }
 
@@ -224,9 +234,7 @@ check_root() {
 
 detect_os() {
     if [ -f /etc/os-release ]; then
-        # shellcheck source=/dev/null
-        . /etc/os-release
-        echo "$ID"
+        awk -F= '$1 == "ID" { gsub(/"/, "", $2); print $2; exit }' /etc/os-release
     elif [ -f /etc/redhat-release ]; then
         echo "rhel"
     else
@@ -236,9 +244,7 @@ detect_os() {
 
 detect_os_version() {
     if [ -f /etc/os-release ]; then
-        # shellcheck source=/dev/null
-        . /etc/os-release
-        echo "${VERSION_CODENAME:-unknown}"
+        awk -F= '$1 == "VERSION_CODENAME" { gsub(/"/, "", $2); print $2; exit }' /etc/os-release
     else
         echo "unknown"
     fi
@@ -726,19 +732,24 @@ get_domain_for_mode() {
 # ==================== 帮助信息 ====================
 show_help() {
     cat <<EOF
-洪哥的 AI 工具箱 v${VERSION} — 一键部署脚本
+HongBox v${VERSION} — AI-native server deployment toolkit
 
 用法:
-  ./install.sh              # 交互式部署
-  ./install.sh -h           # 显示此帮助
-  ./install.sh --version    # 显示版本
+  ./install.sh plan --services new-api --domain api.example.com
+  ./install.sh preflight --profile deploy.env
+  sudo ./install.sh apply --profile deploy.env --yes
+  ./install.sh status
+  ./install.sh doctor --profile deploy.env
+  ./install.sh -h
+  ./install.sh --version
 
-部署流程:
-  1. 检测当前已安装的服务
-  2. 选择要安装的服务
-  3. 配置访问模式（域名/IP/HTTP）
-  4. 逐服务填写配置（如需要）
-  5. 确认并开始安装
+AI 协作流程:
+  1. 在对话中确认服务、域名、数据库和风险项
+  2. 生成 .env profile 或明确 CLI 参数
+  3. plan 输出部署计划
+  4. preflight 检查环境
+  5. 用户确认后 apply --yes 非交互执行
+  6. status/doctor 检查状态和排障
 
 可用组件:
   Maintenance              服务器维护基线：fail2ban / swap / 日志限制 / Docker 日志轮转
@@ -751,19 +762,25 @@ show_help() {
 注意:
   - 需要 root 权限
   - 域名模式需要 DNS 已解析
+  - apply 必须显式 --yes 或 HONGBOX_CONFIRM_APPLY=yes
   - 安装日志保存在 /var/log/vps-deploy/
 EOF
     exit 0
 }
 
 # ==================== 参数解析 ====================
-for arg in "$@"; do
-    case "$arg" in
-        -h|--help)    show_help ;;
-        --version)    echo "v${VERSION}"; exit 0 ;;
-        -*)           echo "未知参数: $arg"; echo "使用 -h 查看帮助"; exit 1 ;;
-    esac
-done
+case "${1:-}" in
+    plan|preflight|apply|status|doctor|help) ;;
+    *)
+        for arg in "$@"; do
+            case "$arg" in
+                -h|--help)    show_help ;;
+                --version)    echo "v${VERSION}"; exit 0 ;;
+                -*)           echo "未知参数: $arg"; echo "使用 -h 查看帮助"; exit 1 ;;
+            esac
+        done
+        ;;
+esac
 
 # ==================== 全局状态 ====================
 
@@ -874,8 +891,10 @@ prompt_return_home() {
 
 detect_installed_services() {
     ALREADY_INSTALLED=()
-    echo ""
-    echo -e "${CYAN}正在检测已安装的服务...${NC}"
+    if [ -z "${CLI_COMMAND:-}" ]; then
+        echo ""
+        echo -e "${CYAN}正在检测已安装的服务...${NC}"
+    fi
 
     for svc in "${ALL_SERVICES[@]}"; do
         case "$svc" in
@@ -1930,6 +1949,561 @@ print_summary() {
     echo ""
 }
 
+# ==================== AI/CLI 子命令 ====================
+
+cli_usage() {
+    cat <<EOF
+HongBox v${VERSION} — AI-native server deployment toolkit
+
+用法:
+  ./install.sh plan --services new-api --domain api.example.com
+  ./install.sh preflight --profile deploy.env
+  sudo ./install.sh apply --profile deploy.env --yes
+  ./install.sh status [--services all|new-api,cliproxyapi]
+  ./install.sh doctor [--profile deploy.env]
+
+通用参数:
+  --profile FILE                  读取 .env 风格部署配置
+  --services LIST                 逗号分隔服务: maintenance,nginx,docker,cliproxyapi,new-api,pi
+  --access-mode MODE              domain | ip | http
+  --domain VALUE                  单个 Web 服务域名/IP
+  --cliproxy-domain VALUE         CliproxyAPI 专用域名
+  --newapi-domain VALUE           New-API 专用域名
+  --cliproxy-mode MODE            docker | bare
+  --db-type TYPE                  postgresql | mysql
+  --admin-password VALUE          CliproxyAPI 管理密码；省略则自动生成
+  --yes                           apply 时确认执行计划
+
+Profile 示例:
+  HONGBOX_SERVICES="maintenance,nginx,docker,new-api"
+  HONGBOX_ACCESS_MODE="domain"
+  HONGBOX_NEWAPI_DOMAIN="api.example.com"
+  HONGBOX_DB_TYPE="postgresql"
+  HONGBOX_CONFIRM_APPLY="yes"
+
+说明:
+  plan/preflight/status/doctor 不执行安装。apply 只接受明确参数或 profile，
+  并且需要 --yes 或 HONGBOX_CONFIRM_APPLY=yes 才会真正修改系统。
+EOF
+}
+
+trim_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
+normalize_service_id() {
+    local svc
+    svc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    svc="${svc//_/-}"
+    case "$svc" in
+        all) echo "all" ;;
+        maintenance|maint|baseline) echo "$SVC_MAINTENANCE" ;;
+        nginx) echo "$SVC_NGINX" ;;
+        docker|compose) echo "$SVC_DOCKER" ;;
+        cliproxy|cliproxyapi|cpa|cli-proxy-api) echo "$SVC_CLIPROXY" ;;
+        newapi|new-api) echo "$SVC_NEWAPI" ;;
+        pi|pi-coding-agent|coding-agent) echo "$SVC_PI" ;;
+        *)
+            echo "未知服务: $1" >&2
+            return 1
+            ;;
+    esac
+}
+
+service_env_prefix() {
+    case "$1" in
+        "$SVC_CLIPROXY") echo "CLIPROXY" ;;
+        "$SVC_NEWAPI")   echo "NEWAPI" ;;
+        *)               echo "" ;;
+    esac
+}
+
+load_profile_file() {
+    local profile="$1"
+
+    if [ ! -r "$profile" ]; then
+        echo "[ERROR] profile 不存在或不可读: $profile" >&2
+        exit 1
+    fi
+
+    set -a
+    # shellcheck source=/dev/null
+    . "$profile"
+    set +a
+}
+
+CLI_COMMAND=""
+CLI_PROFILE=""
+CLI_SERVICES="${HONGBOX_SERVICES:-${HONGAIBOX_SERVICES:-}}"
+CLI_ASSUME_YES=false
+CLI_STATUS_SERVICES=""
+CLI_CLIPROXY_DOMAIN="${HONGBOX_CLIPROXY_DOMAIN:-${HONGAIBOX_CLIPROXY_DOMAIN:-}}"
+CLI_NEWAPI_DOMAIN="${HONGBOX_NEWAPI_DOMAIN:-${HONGAIBOX_NEWAPI_DOMAIN:-}}"
+
+parse_cli_args() {
+    CLI_COMMAND="$1"
+    shift || true
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -h|--help)
+                cli_usage
+                exit 0
+                ;;
+            --profile)
+                CLI_PROFILE="${2:-}"
+                shift 2
+                ;;
+            --services|--service)
+                CLI_SERVICES="${2:-}"
+                CLI_STATUS_SERVICES="$CLI_SERVICES"
+                shift 2
+                ;;
+            --access-mode)
+                ACCESS_MODE="${2:-}"
+                shift 2
+                ;;
+            --domain)
+                DOMAIN="${2:-}"
+                shift 2
+                ;;
+            --cliproxy-domain)
+                CLI_CLIPROXY_DOMAIN="${2:-}"
+                shift 2
+                ;;
+            --newapi-domain|--new-api-domain)
+                CLI_NEWAPI_DOMAIN="${2:-}"
+                shift 2
+                ;;
+            --cliproxy-mode)
+                CLIPROXY_DEPLOY_MODE="${2:-}"
+                shift 2
+                ;;
+            --db-type)
+                DB_TYPE="${2:-}"
+                shift 2
+                ;;
+            --admin-password)
+                ADMIN_PASSWORD="${2:-}"
+                shift 2
+                ;;
+            --yes|-y)
+                CLI_ASSUME_YES=true
+                shift
+                ;;
+            *)
+                echo "[ERROR] 未知参数: $1" >&2
+                cli_usage >&2
+                exit 1
+                ;;
+        esac
+    done
+
+    if [ -n "$CLI_PROFILE" ]; then
+        load_profile_file "$CLI_PROFILE"
+    fi
+
+    CLI_SERVICES="${CLI_SERVICES:-${HONGBOX_SERVICES:-${HONGAIBOX_SERVICES:-}}}"
+    ACCESS_MODE="${ACCESS_MODE:-${HONGBOX_ACCESS_MODE:-${HONGAIBOX_ACCESS_MODE:-}}}"
+    DOMAIN="${DOMAIN:-${HONGBOX_DOMAIN:-${HONGAIBOX_DOMAIN:-}}}"
+    CLIPROXY_DEPLOY_MODE="${CLIPROXY_DEPLOY_MODE:-${HONGBOX_CLIPROXY_MODE:-${HONGAIBOX_CLIPROXY_DEPLOY_MODE:-docker}}}"
+    DB_TYPE="${DB_TYPE:-${HONGBOX_DB_TYPE:-${HONGAIBOX_DB_TYPE:-postgresql}}}"
+    ADMIN_PASSWORD="${ADMIN_PASSWORD:-${HONGBOX_ADMIN_PASSWORD:-${HONGAIBOX_ADMIN_PASSWORD:-}}}"
+    CLI_CLIPROXY_DOMAIN="${CLI_CLIPROXY_DOMAIN:-${HONGBOX_CLIPROXY_DOMAIN:-${HONGAIBOX_CLIPROXY_DOMAIN:-}}}"
+    CLI_NEWAPI_DOMAIN="${CLI_NEWAPI_DOMAIN:-${HONGBOX_NEWAPI_DOMAIN:-${HONGAIBOX_NEWAPI_DOMAIN:-}}}"
+
+    if [ "${HONGBOX_CONFIRM_APPLY:-${HONGAIBOX_CONFIRM_APPLY:-}}" = "yes" ]; then
+        CLI_ASSUME_YES=true
+    fi
+}
+
+select_cli_services() {
+    local raw="$1"
+    local item svc
+
+    if [ -z "$raw" ]; then
+        echo "[ERROR] 缺少服务列表。请使用 --services 或在 profile 中设置 HONGBOX_SERVICES。" >&2
+        exit 1
+    fi
+
+    raw="${raw// /}"
+    IFS=',' read -r -a requested_services <<< "$raw"
+
+    for item in "${requested_services[@]}"; do
+        [ -z "$item" ] && continue
+        svc="$(normalize_service_id "$item")" || exit 1
+        if [ "$svc" = "all" ]; then
+            for svc in "${ALL_SERVICES[@]}"; do
+                TO_INSTALL[$svc]=true
+            done
+            return 0
+        fi
+        TO_INSTALL[$svc]=true
+    done
+}
+
+validate_cli_config() {
+    local svc web_count=0
+
+    case "$ACCESS_MODE" in
+        ""|domain|ip|http) ;;
+        *)
+            echo "[ERROR] --access-mode 只能是 domain、ip 或 http，当前: $ACCESS_MODE" >&2
+            exit 1
+            ;;
+    esac
+
+    case "$CLIPROXY_DEPLOY_MODE" in
+        docker|compose|docker-compose) CLIPROXY_DEPLOY_MODE="docker" ;;
+        bare|binary|systemd|native|host) CLIPROXY_DEPLOY_MODE="bare" ;;
+        *)
+            echo "[ERROR] --cliproxy-mode 只能是 docker 或 bare，当前: $CLIPROXY_DEPLOY_MODE" >&2
+            exit 1
+            ;;
+    esac
+
+    case "$DB_TYPE" in
+        postgresql|postgres|pg) DB_TYPE="postgresql" ;;
+        mysql) DB_TYPE="mysql" ;;
+        *)
+            echo "[ERROR] --db-type 只能是 postgresql 或 mysql，当前: $DB_TYPE" >&2
+            exit 1
+            ;;
+    esac
+
+    if [ "${TO_INSTALL[$SVC_CLIPROXY]:-}" = "true" ] && [ -n "$CLI_CLIPROXY_DOMAIN" ]; then
+        SERVICE_DOMAIN[$SVC_CLIPROXY]="$CLI_CLIPROXY_DOMAIN"
+    fi
+    if [ "${TO_INSTALL[$SVC_NEWAPI]:-}" = "true" ] && [ -n "$CLI_NEWAPI_DOMAIN" ]; then
+        SERVICE_DOMAIN[$SVC_NEWAPI]="$CLI_NEWAPI_DOMAIN"
+    fi
+
+    for svc in "${ALL_SERVICES[@]}"; do
+        if [ "${TO_INSTALL[$svc]:-}" = "true" ] && is_web_service "$svc"; then
+            web_count=$((web_count + 1))
+        fi
+    done
+
+    if [ "$web_count" -gt 0 ] && [ -z "$ACCESS_MODE" ]; then
+        ACCESS_MODE="domain"
+    fi
+
+    if [ "$web_count" -eq 1 ] && [ -n "$DOMAIN" ]; then
+        for svc in "$SVC_CLIPROXY" "$SVC_NEWAPI"; do
+            if [ "${TO_INSTALL[$svc]:-}" = "true" ] && [ -z "${SERVICE_DOMAIN[$svc]:-}" ]; then
+                SERVICE_DOMAIN[$svc]="$DOMAIN"
+            fi
+        done
+    fi
+
+    if [ "$web_count" -gt 1 ] && [ "$ACCESS_MODE" != "domain" ]; then
+        echo "[ERROR] 同时部署多个 Web 服务时必须使用 domain 模式并为每个服务提供独立域名。" >&2
+        exit 1
+    fi
+
+    for svc in "${ALL_SERVICES[@]}"; do
+        if [ "${TO_INSTALL[$svc]:-}" != "true" ] || ! is_web_service "$svc"; then
+            continue
+        fi
+
+        if [ "$ACCESS_MODE" = "domain" ] && [ -z "${SERVICE_DOMAIN[$svc]:-}" ]; then
+            echo "[ERROR] 缺少 ${SVC_NAME[$svc]} 域名。请提供 --domain、--$(service_env_prefix "$svc" | tr '[:upper:]' '[:lower:]')-domain 或 profile 变量。" >&2
+            exit 1
+        fi
+
+        if [ "$ACCESS_MODE" = "domain" ]; then
+            validate_domain "${SERVICE_DOMAIN[$svc]}" >/dev/null || exit 1
+        elif [ "$ACCESS_MODE" = "ip" ] || [ "$ACCESS_MODE" = "http" ]; then
+            if [ -z "${SERVICE_DOMAIN[$svc]:-}" ]; then
+                SERVICE_DOMAIN[$svc]="$(detect_server_ip)"
+            fi
+            validate_ip "${SERVICE_DOMAIN[$svc]}" >/dev/null || exit 1
+        fi
+    done
+}
+
+prepare_cli_plan() {
+    reset_iteration_state
+    parse_cli_args "$@"
+    detect_installed_services
+    select_cli_services "$CLI_SERVICES"
+    validate_cli_config
+    HONGAIBOX_CLIPROXY_DEPLOY_MODE="$CLIPROXY_DEPLOY_MODE"
+    configure_deployment_modes
+    resolve_deps
+}
+
+print_cli_plan() {
+    local svc dep domain_value
+
+    echo "HongBox deployment plan"
+    echo "Version: v${VERSION}"
+    echo "Profile: ${CLI_PROFILE:-inline arguments/env}"
+    echo ""
+    echo "Requested services:"
+    for svc in "${ALL_SERVICES[@]}"; do
+        if [ "${TO_INSTALL[$svc]:-}" = "true" ]; then
+            echo "  - $(service_short_name "$svc"): ${SVC_DESC[$svc]}"
+        fi
+    done
+
+    echo ""
+    echo "Install order:"
+    if [ "${#INSTALL_ORDER[@]}" -eq 0 ]; then
+        echo "  - Nothing to install"
+    else
+        for svc in "${INSTALL_ORDER[@]}"; do
+            dep="${SVC_DEPENDS[$svc]}"
+            [ -z "$dep" ] && dep="none"
+            echo "  - $(service_short_name "$svc")"
+            echo "    status: ${ALREADY_INSTALLED[$svc]:-false}"
+            echo "    script: ${SVC_SCRIPT[$svc]}"
+            echo "    dependencies: $dep"
+            if is_web_service "$svc"; then
+                domain_value="${SERVICE_DOMAIN[$svc]:-}"
+                echo "    access_mode: ${ACCESS_MODE:-none}"
+                echo "    endpoint: ${domain_value:-not set}"
+            fi
+            case "$svc" in
+                "$SVC_CLIPROXY")
+                    echo "    deploy_mode: $CLIPROXY_DEPLOY_MODE"
+                    if [ -n "$ADMIN_PASSWORD" ]; then
+                        echo "    admin_password: provided (hidden)"
+                    else
+                        echo "    admin_password: auto-generated"
+                    fi
+                    ;;
+                "$SVC_NEWAPI")
+                    echo "    database: $DB_TYPE"
+                    ;;
+            esac
+        done
+    fi
+
+    echo ""
+    echo "System changes expected:"
+    echo "  - May install OS packages and enable systemd services"
+    echo "  - May write files under /opt, /etc/nginx, /etc/docker, /var/log/vps-deploy, /var/lib/hongaibox"
+    echo "  - Nginx configs are backed up before overwrite where supported"
+    echo "  - Secret values are written to credential files and are not printed"
+}
+
+report_check() {
+    local status="$1"
+    local label="$2"
+    local detail="${3:-}"
+    printf '  [%s] %s' "$status" "$label"
+    [ -n "$detail" ] && printf ' — %s' "$detail"
+    printf '\n'
+}
+
+run_preflight_checks() {
+    local failures=0 warnings=0 svc domain_value server_ip resolved_ips required
+    local os arch
+
+    os="$(detect_os)"
+    arch="$(detect_arch)"
+    echo "HongBox preflight"
+    echo ""
+
+    case "$os" in
+        debian|ubuntu)
+            report_check "ok" "OS" "$os"
+            ;;
+        *)
+            report_check "fail" "OS" "$os is not a supported target"
+            failures=$((failures + 1))
+            ;;
+    esac
+
+    case "$arch" in
+        linux_amd64|linux_arm64) report_check "ok" "Architecture" "$arch" ;;
+        *)
+            report_check "warn" "Architecture" "$arch"
+            warnings=$((warnings + 1))
+            ;;
+    esac
+
+    if [ "$EUID" -eq 0 ]; then
+        report_check "ok" "Root privileges"
+    else
+        report_check "warn" "Root privileges" "apply must run with sudo/root"
+        warnings=$((warnings + 1))
+    fi
+
+    for required in bash sed awk grep find xargs; do
+        if command -v "$required" >/dev/null 2>&1; then
+            report_check "ok" "Command $required"
+        else
+            report_check "fail" "Command $required" "missing"
+            failures=$((failures + 1))
+        fi
+    done
+
+    if command -v curl >/dev/null 2>&1 || command -v wget >/dev/null 2>&1; then
+        report_check "ok" "Downloader" "curl/wget available"
+    else
+        report_check "fail" "Downloader" "curl or wget required"
+        failures=$((failures + 1))
+    fi
+
+    for svc in "${INSTALL_ORDER[@]}"; do
+        if [ ! -x "${SVC_SCRIPT[$svc]}" ]; then
+            if [ -f "${SVC_SCRIPT[$svc]}" ]; then
+                report_check "warn" "$(service_short_name "$svc") script" "not executable; apply will chmod +x"
+                warnings=$((warnings + 1))
+            else
+                report_check "fail" "$(service_short_name "$svc") script" "missing: ${SVC_SCRIPT[$svc]}"
+                failures=$((failures + 1))
+            fi
+        else
+            report_check "ok" "$(service_short_name "$svc") script" "${SVC_SCRIPT[$svc]}"
+        fi
+    done
+
+    if needs_access_mode; then
+        server_ip="$(detect_server_ip)"
+        [ -n "$server_ip" ] && report_check "ok" "Detected server IP" "$server_ip" || report_check "warn" "Detected server IP" "not available"
+        if [ -z "$server_ip" ]; then
+            warnings=$((warnings + 1))
+        fi
+
+        for svc in "${INSTALL_ORDER[@]}"; do
+            if ! is_web_service "$svc"; then
+                continue
+            fi
+            domain_value="${SERVICE_DOMAIN[$svc]:-}"
+            [ -z "$domain_value" ] && continue
+
+            if [ "$ACCESS_MODE" = "domain" ]; then
+                resolved_ips="$(getent ahosts "$domain_value" 2>/dev/null | awk '{print $1}' | sort -u | paste -sd, - || true)"
+                if [ -z "$resolved_ips" ]; then
+                    report_check "warn" "DNS $domain_value" "no A/AAAA records found from this host"
+                    warnings=$((warnings + 1))
+                elif [ -n "$server_ip" ] && ! printf '%s\n' "$resolved_ips" | tr ',' '\n' | grep -qx "$server_ip"; then
+                    report_check "warn" "DNS $domain_value" "resolves to $resolved_ips, detected server IP is $server_ip"
+                    warnings=$((warnings + 1))
+                else
+                    report_check "ok" "DNS $domain_value" "$resolved_ips"
+                fi
+            fi
+        done
+
+        for required in 80 443; do
+            if check_port_available "$required"; then
+                report_check "ok" "Port $required" "available"
+            else
+                report_check "warn" "Port $required" "currently in use; this can be normal if Nginx is already installed"
+                warnings=$((warnings + 1))
+            fi
+        done
+    fi
+
+    echo ""
+    echo "Preflight summary: $failures failure(s), $warnings warning(s)"
+    [ "$failures" -eq 0 ]
+}
+
+print_cli_status() {
+    local svc selected_filter="$1"
+
+    detect_installed_services
+    echo "HongBox status"
+    echo ""
+    printf '%-16s %-10s %s\n' "Service" "Installed" "Details"
+    printf '%-16s %-10s %s\n' "-------" "---------" "-------"
+    for svc in "${ALL_SERVICES[@]}"; do
+        if [ -n "$selected_filter" ] && [ "$selected_filter" != "all" ] && ! [[ ",$selected_filter," == *",$svc,"* ]]; then
+            continue
+        fi
+        printf '%-16s %-10s ' "$(service_short_name "$svc")" "${ALREADY_INSTALLED[$svc]:-false}"
+        case "$svc" in
+            "$SVC_MAINTENANCE") echo "marker: $([ -f /var/lib/hongaibox/maintenance.installed ] && echo present || echo missing)" ;;
+            "$SVC_NGINX")       echo "$(nginx -v 2>&1 | sed 's/^nginx version: //' || echo unavailable)" ;;
+            "$SVC_DOCKER")      echo "$(docker --version 2>/dev/null || echo unavailable)" ;;
+            "$SVC_CLIPROXY")    echo "$(compose_running_text /opt/docker-services/cliproxyapi)" ;;
+            "$SVC_NEWAPI")      echo "$(compose_running_text /opt/docker-services/new-api)" ;;
+            "$SVC_PI")          echo "$(command -v pi 2>/dev/null || echo unavailable)" ;;
+        esac
+    done
+}
+
+run_cli_command() {
+    local command="$1"
+    shift || true
+
+    case "$command" in
+        help)
+            cli_usage
+            ;;
+        plan)
+            prepare_cli_plan "$command" "$@"
+            print_cli_plan
+            ;;
+        preflight)
+            prepare_cli_plan "$command" "$@"
+            print_cli_plan
+            echo ""
+            run_preflight_checks
+            ;;
+        apply)
+            prepare_cli_plan "$command" "$@"
+            if [ "$CLI_ASSUME_YES" != "true" ]; then
+                print_cli_plan
+                echo ""
+                echo "[ERROR] apply 需要显式确认。请在人工确认计划后追加 --yes，或设置 HONGBOX_CONFIRM_APPLY=yes。" >&2
+                exit 1
+            fi
+            check_root
+            setup_logging "hongbox"
+            print_cli_plan
+            echo ""
+            run_preflight_checks
+            echo ""
+            run_install
+            print_summary
+            exit "$FAILED"
+            ;;
+        status)
+            parse_cli_args "$command" "$@"
+            local status_filter="" normalized item
+            if [ -n "${CLI_STATUS_SERVICES:-$CLI_SERVICES}" ]; then
+                local raw_services="${CLI_STATUS_SERVICES:-$CLI_SERVICES}"
+                raw_services="${raw_services// /}"
+                IFS=',' read -r -a status_items <<< "$raw_services"
+                for item in "${status_items[@]}"; do
+                    normalized="$(normalize_service_id "$item")" || exit 1
+                    if [ "$normalized" = "all" ]; then
+                        status_filter="all"
+                        break
+                    fi
+                    status_filter="${status_filter}${status_filter:+,}${normalized}"
+                done
+            fi
+            print_cli_status "$status_filter"
+            ;;
+        doctor)
+            parse_cli_args "$command" "$@"
+            if [ -z "${CLI_SERVICES:-}" ]; then
+                print_cli_status "all"
+                exit 0
+            fi
+            prepare_cli_plan "$command" "$@"
+            print_cli_status "all"
+            echo ""
+            run_preflight_checks
+            ;;
+        *)
+            echo "[ERROR] 未知命令: $command" >&2
+            cli_usage >&2
+            exit 1
+            ;;
+    esac
+}
+
 # ==================== 主流程 ====================
 
 main() {
@@ -1989,4 +2563,17 @@ main() {
 }
 
 # ==================== 执行 ====================
-main "$@"
+case "${1:-}" in
+    plan|preflight|apply|status|doctor|help)
+        run_cli_command "$@"
+        ;;
+    *)
+        if [ "$#" -eq 0 ]; then
+            cli_usage
+            exit 0
+        fi
+        echo "[ERROR] 未知命令: $1" >&2
+        cli_usage >&2
+        exit 1
+        ;;
+esac

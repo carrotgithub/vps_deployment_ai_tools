@@ -22,43 +22,56 @@ jobs:
       - name: Bundle project
         run: |
           mkdir -p dist/hong-ai-box
-          cp -a install.sh lib maintenance nginx docker cliproxyapi new-api pi-coding-agent README.md docs LICENSE dist/hong-ai-box/
+          cp -a hongbox install.sh lib maintenance nginx docker cliproxyapi new-api pi-coding-agent README.md docs codex-skills LICENSE dist/hong-ai-box/
           tar czf hong-ai-box.tar.gz -C dist hong-ai-box
           sha256sum hong-ai-box.tar.gz > checksums.txt
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "hongaibox ${{ github.ref_name }}"
+          name: "HongBox ${{ github.ref_name }}"
           body: |
-            ## 洪哥的 AI 工具箱 ${{ github.ref_name }}
+            ## HongBox（洪盒）${{ github.ref_name }}
 
-            ### 方式一：一键安装（推荐）
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/YoungHong1992/hong-ai-box/${{ github.ref_name }}/install.sh | sudo env HONGAIBOX_REF=${{ github.ref_name }} bash
-            ```
-
-            > 该入口会自动下载同一 tag 的完整安装包后再启动交互式安装。
-
-            ### 方式二：下载完整包
+            ### 方式一：AI 协作部署（推荐）
 
             ```bash
             curl -fsSLO https://github.com/YoungHong1992/hong-ai-box/releases/latest/download/hong-ai-box.tar.gz
             tar xzf hong-ai-box.tar.gz
             cd hong-ai-box
-            sudo ./install.sh
+            ./hongbox plan --services new-api --domain api.example.com
+            ./hongbox preflight --services new-api --domain api.example.com
+            sudo ./hongbox apply --services new-api --domain api.example.com --yes
             ```
 
-            ### 方式三：克隆仓库
+            > 建议先由 AI agent 和用户确认服务、域名、数据库、风险项，再执行 apply。
+
+            ### 方式二：Profile 部署
 
             ```bash
-            git clone https://github.com/YoungHong1992/hong-ai-box.git
+            curl -fsSLO https://github.com/YoungHong1992/hong-ai-box/releases/latest/download/hong-ai-box.tar.gz
+            tar xzf hong-ai-box.tar.gz
             cd hong-ai-box
-            sudo ./install.sh
+            cat > deploy.env <<'EOF'
+            HONGBOX_SERVICES="maintenance,nginx,docker,new-api"
+            HONGBOX_ACCESS_MODE="domain"
+            HONGBOX_NEWAPI_DOMAIN="api.example.com"
+            HONGBOX_DB_TYPE="postgresql"
+            EOF
+            ./hongbox plan --profile deploy.env
+            ./hongbox preflight --profile deploy.env
+            sudo ./hongbox apply --profile deploy.env --yes
             ```
 
-            ### 根目录 install.sh 可选组件
+            ### 方式三：远程入口
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/YoungHong1992/hong-ai-box/${{ github.ref_name }}/install.sh | env HONGAIBOX_REF=${{ github.ref_name }} bash
+            ```
+
+            > 无参数运行只显示帮助，不进入终端菜单。请使用 release 包或完整仓库中的 `hongbox plan/preflight/apply/status/doctor`。
+
+            ### 可选组件
 
             | 组件 | 描述 | 资源需求 |
             |------|------|----------|

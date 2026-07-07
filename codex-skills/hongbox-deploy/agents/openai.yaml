@@ -1,0 +1,4 @@
+interface:
+  display_name: "HongBox Deploy"
+  short_description: "Deploy AI server stacks with HongBox"
+  default_prompt: "Use $hongbox-deploy to plan, preflight, and deploy a HongBox service on this VPS."
