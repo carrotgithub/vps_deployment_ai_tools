@@ -11,6 +11,20 @@
 #   4. 自动申请 SSL 证书
 #   5. 自动配置 Nginx 反向代理
 #   6. 生成随机密码并保存到信息文件
+#   7. 默认非交互，用环境变量传参；INTERACTIVE=1 走交互
+#
+# 环境变量：
+#   ACCESS_MODE        domain / ip / http，也可写 1 / 2 / 3     (默认 domain)
+#   DOMAIN             域名；ip / http 模式不填则用本机公网 IP  (domain 模式必填)
+#   DB                 postgres / mysql，也可写 1 / 2           (默认 postgres)
+#   FORCE              1=已安装时覆盖安装                       (默认 0，已安装则中止)
+#   ALLOW_SELF_SIGNED  1=Let's Encrypt 失败时退回自签名证书    (默认 0，失败即中止)
+#   INTERACTIVE        1=交互输入与确认                        (默认 0)
+#
+# 示例：
+#   DOMAIN=newapi.example.com bash install_newapi_docker.sh
+#   DOMAIN=newapi.example.com DB=mysql bash install_newapi_docker.sh
+#   INTERACTIVE=1 bash install_newapi_docker.sh
 #
 # 部署架构：
 #   Docker Compose: new-api + PostgreSQL + Redis
@@ -42,6 +56,13 @@ DOCKER_ROOT="/opt/docker-services"
 SERVICE_DIR="$DOCKER_ROOT/new-api"
 DATA_DIR="$SERVICE_DIR/data"
 LOGS_DIR="$SERVICE_DIR/logs"
+
+ACCESS_MODE="${ACCESS_MODE:-domain}"
+DOMAIN="${DOMAIN:-}"
+DB="${DB:-postgres}"
+FORCE="${FORCE:-0}"
+ALLOW_SELF_SIGNED="${ALLOW_SELF_SIGNED:-0}"
+INTERACTIVE="${INTERACTIVE:-0}"
 
 GITHUB_REPO="QuantumNous/new-api"
 DOCKER_IMAGE="calciumion/new-api:latest"
@@ -160,7 +181,7 @@ done
 
 # ==================== 欢迎横幅 ====================
 
-clear
+if [ "$INTERACTIVE" = "1" ]; then clear; fi
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo -e "${CYAN}   New-API Docker 部署程序${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -169,104 +190,109 @@ echo ""
 # 检查是否已安装
 if [ -f "$SERVICE_DIR/docker-compose.yml" ]; then
     log_warning "检测到已安装 New-API"
-    echo ""
-    read -p "是否覆盖安装？(y/N): " -n 1 -r
-    echo ""
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        log_info "安装已取消。"
-        exit 0
+    if [ "$INTERACTIVE" = "1" ]; then
+        echo ""
+        read -p "是否覆盖安装？(y/N): " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            log_info "安装已取消。"
+            exit 0
+        fi
+    elif [ "$FORCE" != "1" ]; then
+        log_error "已安装 New-API，未做任何改动。确认覆盖安装请加 FORCE=1"
+        exit 1
     fi
 fi
 
-# ==================== 交互输入 ====================
+# ==================== 读取配置 ====================
 
-log_step "[1/8] 请输入配置信息"
+log_step "[1/8] 读取配置信息"
 echo ""
 
-# 访问方式选择
-echo -e "${CYAN}>>> 请选择访问方式${NC}"
-echo ""
-echo "  1) 使用域名（推荐）- 自动申请 Let's Encrypt 证书"
-echo "  2) 使用 IP 地址   - 自签名证书，浏览器会提示不安全"
-echo "  3) 仅使用 HTTP    - 无 SSL 证书，仅限内网/开发环境"
-echo ""
-read -p "请选择 [1/2/3]: " ACCESS_MODE
+detect_server_ip() {
+    curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}'
+}
 
-USE_DOMAIN=true
-USE_HTTP_ONLY=false
-if [ "$ACCESS_MODE" = "2" ]; then
-    USE_DOMAIN=false
-    # 自动获取服务器 IP
-    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
+if [ "$INTERACTIVE" = "1" ]; then
+    echo -e "${CYAN}>>> 请选择访问方式${NC}"
     echo ""
-    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
-    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
-    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
-        DOMAIN="$SERVER_IP"
-    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
-        read -p "请输入 IP 地址: " DOMAIN
-    else
-        DOMAIN="$IP_CONFIRM"
+    echo "  1) 使用域名（推荐）- 自动申请 Let's Encrypt 证书"
+    echo "  2) 使用 IP 地址   - 自签名证书，浏览器会提示不安全"
+    echo "  3) 仅使用 HTTP    - 无 SSL 证书，仅限内网/开发环境"
+    echo ""
+    read -p "请选择 [1/2/3，默认 1]: " v
+    [ -n "$v" ] && ACCESS_MODE="$v"
+fi
+
+case "$ACCESS_MODE" in
+    1|domain) ACCESS_MODE=domain; USE_DOMAIN=true;  USE_HTTP_ONLY=false ;;
+    2|ip)     ACCESS_MODE=ip;     USE_DOMAIN=false; USE_HTTP_ONLY=false ;;
+    3|http)   ACCESS_MODE=http;   USE_DOMAIN=false; USE_HTTP_ONLY=true ;;
+    *)
+        log_error "ACCESS_MODE 只能是 domain / ip / http (或 1 / 2 / 3): $ACCESS_MODE"
+        exit 1
+        ;;
+esac
+
+SERVER_IP=$(detect_server_ip)
+
+if [ "$USE_DOMAIN" = true ]; then
+    if [ -z "$DOMAIN" ] && [ "$INTERACTIVE" = "1" ]; then
+        echo ""
+        read -p "请输入域名 (例如 newapi.example.com): " DOMAIN
     fi
-elif [ "$ACCESS_MODE" = "3" ]; then
-    USE_DOMAIN=false
-    USE_HTTP_ONLY=true
-    # 自动获取服务器 IP
-    SERVER_IP=$(curl -s --connect-timeout 5 https://api.ipify.org || curl -s --connect-timeout 5 https://ifconfig.me || hostname -I | awk '{print $1}')
-    echo ""
-    echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
-    echo -e "${YELLOW}⚠️  HTTP 模式警告：${NC}"
-    echo -e "${YELLOW}   - 数据传输不加密，API Key 可能泄露${NC}"
-    echo -e "${YELLOW}   - 仅建议在内网或开发环境使用${NC}"
-    echo ""
-    read -p "确认使用此 IP？(y/n，或输入其他 IP): " IP_CONFIRM
-    if [[ "$IP_CONFIRM" =~ ^[Yy]$ ]] || [ -z "$IP_CONFIRM" ]; then
-        DOMAIN="$SERVER_IP"
-    elif [[ "$IP_CONFIRM" =~ ^[Nn]$ ]]; then
-        read -p "请输入 IP 地址: " DOMAIN
-    else
-        DOMAIN="$IP_CONFIRM"
+    if [ -z "$DOMAIN" ]; then
+        log_error "域名模式需要 DOMAIN，例如: DOMAIN=newapi.example.com bash $0 （或 INTERACTIVE=1 交互输入）"
+        exit 1
+    fi
+    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
+        log_error "域名格式不正确: $DOMAIN"
+        exit 1
     fi
 else
-    echo ""
-    read -p "请输入域名 (例如 newapi.example.com): " DOMAIN
-
+    [ -z "$DOMAIN" ] && DOMAIN="$SERVER_IP"
+    if [ "$INTERACTIVE" = "1" ]; then
+        echo ""
+        echo -e "检测到服务器 IP: ${GREEN}$SERVER_IP${NC}"
+        if [ "$USE_HTTP_ONLY" = true ]; then
+            echo -e "${YELLOW}⚠️  HTTP 模式警告：${NC}"
+            echo -e "${YELLOW}   - 数据传输不加密，API Key 可能泄露${NC}"
+            echo -e "${YELLOW}   - 仅建议在内网或开发环境使用${NC}"
+        fi
+        read -p "访问用的 IP [默认: $DOMAIN]: " v
+        [ -n "$v" ] && DOMAIN="$v"
+    fi
     if [ -z "$DOMAIN" ]; then
-        log_error "域名不能为空。"
-        exit 1
-    fi
-
-    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-        log_error "域名格式不正确。"
+        log_error "无法获取服务器 IP，请用 DOMAIN=<IP> 指定"
         exit 1
     fi
 fi
 
-if [ -z "$DOMAIN" ]; then
-    log_error "域名/IP 不能为空。"
-    exit 1
+if [ "$INTERACTIVE" = "1" ]; then
+    echo ""
+    echo -e "${CYAN}选择数据库类型:${NC}"
+    echo "  1) PostgreSQL 15 (推荐，官方默认)"
+    echo "  2) MySQL 8.2"
+    read -p "请选择 [1-2, 默认 1]: " v
+    [ -n "$v" ] && DB="$v"
 fi
 
-echo ""
-
-# 数据库类型选择
-echo -e "${CYAN}选择数据库类型:${NC}"
-echo "  1) PostgreSQL 15 (推荐，官方默认)"
-echo "  2) MySQL 8.2"
-read -p "请选择 [1-2, 默认 1]: " DB_CHOICE
-
-case $DB_CHOICE in
-    2)
+case "$DB" in
+    2|mysql)
         USE_MYSQL=true
         DB_TYPE="MySQL"
         DB_IMAGE="mysql:8.2"
         DB_PORT=3306
         ;;
-    *)
+    1|postgres|postgresql)
         USE_POSTGRESQL=true
         DB_TYPE="PostgreSQL"
         DB_IMAGE="postgres:15"
         DB_PORT=5432
+        ;;
+    *)
+        log_error "DB 只能是 postgres / mysql (或 1 / 2): $DB"
+        exit 1
         ;;
 esac
 
@@ -282,37 +308,165 @@ SESSION_SECRET=$(generate_session_secret)
 log_success "密码已生成（将保存到信息文件）"
 echo ""
 
-# DNS 配置提示 / IP 模式确认
-if [ -z "$SERVER_IP" ]; then
-    SERVER_IP=$(curl -s https://api.ipify.org 2>/dev/null || curl -s http://whatismyip.akamai.com 2>/dev/null || hostname -I | awk '{print $1}')
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+if [ "$USE_HTTP_ONLY" = true ]; then
+    echo -e "${YELLOW}⚠️  HTTP 模式：无 SSL 加密${NC}"
+elif [ "$USE_DOMAIN" = true ]; then
+    echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
+else
+    echo -e "${YELLOW}⚠️  IP 模式：将使用自签名证书，浏览器会提示「不安全」${NC}"
+fi
+echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "访问地址: ${GREEN}$DOMAIN${NC}"
+echo -e "目标IP:   ${GREEN}$SERVER_IP${NC}"
+if [ "$INTERACTIVE" = "1" ]; then
+    echo ""
+    echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    read -r
 fi
 
-if [ "$USE_DOMAIN" = true ]; then
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}⚠️  重要提示：请确保域名已解析${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "域名:   ${GREEN}$DOMAIN${NC}"
-    echo -e "目标IP: ${GREEN}$SERVER_IP${NC}"
-    echo ""
-    echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+# ==================== SSL 配置辅助函数 ====================
+
+# 获取主域名邮箱
+get_main_domain_email() {
+    local domain="$1"
+    local main_domain=$(echo "$domain" | awk -F. '{print $(NF-1)"."$NF}')
+    echo "admin@${main_domain}"
+}
+
+# 检查邮箱是否有效
+is_valid_ssl_email() {
+    local email="$1"
+    [ -z "$email" ] && return 1
+    echo "$email" | grep -qE "@(example\.com|localhost|test\.com)" && return 1
+    return 0
+}
+
+# 确保 acme.sh 配置正确
+ensure_acme_sh_config() {
+    local domain="$1"
+    local expected_email=$(get_main_domain_email "$domain")
+
+    if [ ! -f ~/.acme.sh/acme.sh ]; then
+        curl -s https://get.acme.sh | sh -s email="$expected_email" >/dev/null 2>&1
+        [ -f ~/.bashrc ] && source ~/.bashrc
+        return 0
+    fi
+
+    if [ -f ~/.acme.sh/account.conf ]; then
+        local current_email=$(grep "^ACCOUNT_EMAIL=" ~/.acme.sh/account.conf 2>/dev/null | cut -d"'" -f2)
+
+        if ! is_valid_ssl_email "$current_email"; then
+            sed -i "s/^ACCOUNT_EMAIL=.*/ACCOUNT_EMAIL='$expected_email'/g" ~/.acme.sh/account.conf
+            rm -rf ~/.acme.sh/ca/*/account.json 2>/dev/null || true
+        fi
+    fi
+}
+
+# ==================== SSL 证书配置 ====================
+
+log_step "[2/8] 配置 SSL 证书（先于容器，失败即中止）..."
+
+# 创建证书目录
+DOMAIN_SSL_DIR="$SSL_DIR/$DOMAIN"
+if [ -d "$DOMAIN_SSL_DIR" ]; then SSL_DIR_EXISTED=true; else SSL_DIR_EXISTED=false; fi
+mkdir -p "$DOMAIN_SSL_DIR"
+
+if [ "$USE_HTTP_ONLY" = true ]; then
+    # HTTP 模式：跳过 SSL 证书
+    log_info "HTTP 模式，跳过 SSL 证书配置"
+    SSL_TYPE="无 (HTTP 模式)"
+elif [ "$USE_DOMAIN" = true ]; then
+    # 域名模式：申请 Let's Encrypt 证书
+    log_info "申请 Let's Encrypt ECC 证书..."
+
+    # 确保 acme.sh 配置正确
+    ensure_acme_sh_config "$DOMAIN"
+    [ -f ~/.bashrc ] && source ~/.bashrc
+
+    ACME_PREV_CONF=""
+    if [ -f "$CONF_D/${DOMAIN}.conf" ]; then
+        ACME_PREV_CONF="$CONF_D/${DOMAIN}.conf.pre-acme"
+        cp -a "$CONF_D/${DOMAIN}.conf" "$ACME_PREV_CONF"
+    fi
+
+    # 临时 Nginx 配置用于验证
+    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
+    location /.well-known/acme-challenge/ {
+        root /var/www/acme;
+    }
+}
+EOF
+
+    mkdir -p /var/www/acme
+    chmod 755 /var/www/acme
+    systemctl reload nginx >/dev/null 2>&1
+
+    # 申请证书
+    ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
+
+    # 安装证书
+    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
+        --key-file       "$DOMAIN_SSL_DIR/key.pem" \
+        --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
+        --reloadcmd     "systemctl reload nginx" >/dev/null 2>&1
+
+    if [ $? -eq 0 ] && [ -s "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
+        log_success "SSL 证书申请成功 (Let's Encrypt ECC)"
+        SSL_TYPE="Let's Encrypt (ECC-256)"
+        rm -f "$ACME_PREV_CONF"
+    elif [ "$ALLOW_SELF_SIGNED" = "1" ]; then
+        log_warning "Let's Encrypt 申请失败，ALLOW_SELF_SIGNED=1，改用自签名证书..."
+        rm -f "$ACME_PREV_CONF"
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$DOMAIN_SSL_DIR/key.pem" \
+            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        SSL_TYPE="自签名证书 (Let's Encrypt 申请失败)"
+    else
+        if [ -n "$ACME_PREV_CONF" ]; then
+            mv -f "$ACME_PREV_CONF" "$CONF_D/${DOMAIN}.conf"
+        else
+            rm -f "$CONF_D/${DOMAIN}.conf"
+        fi
+        [ "$SSL_DIR_EXISTED" = false ] && rm -rf "$DOMAIN_SSL_DIR"
+        systemctl reload nginx >/dev/null 2>&1
+        log_error "Let's Encrypt 证书申请失败，已中止（未创建目录、未启动容器）。"
+        log_info "确认 $DOMAIN 已解析到本机、80 端口公网可达后重跑；确需自签名证书时加 ALLOW_SELF_SIGNED=1。"
+        exit 1
+    fi
 else
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}⚠️  IP 模式注意事项${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "访问地址: ${GREEN}https://$DOMAIN${NC}"
-    echo ""
-    echo -e "${YELLOW}提示: 将使用自签名证书${NC}"
-    echo -e "${YELLOW}访问时浏览器会提示「不安全」，请点击「高级」→「继续访问」${NC}"
-    echo ""
-    echo -e "${YELLOW}[按回车键继续部署，Ctrl+C 取消]${NC}"
-    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    # IP 模式：生成自签名证书
+    log_info "生成自签名证书 (IP 模式)..."
+
+    # 生成支持 IP 的自签名证书
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout "$DOMAIN_SSL_DIR/key.pem" \
+        -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+        -subj "/CN=$DOMAIN" \
+        -addext "subjectAltName=IP:$DOMAIN" >/dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        log_success "自签名证书生成成功"
+        SSL_TYPE="自签名证书 (IP 模式)"
+    else
+        # 旧版 OpenSSL 不支持 -addext，使用备用方法
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+            -keyout "$DOMAIN_SSL_DIR/key.pem" \
+            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
+            -subj "/CN=$DOMAIN" >/dev/null 2>&1
+        log_success "自签名证书生成成功 (兼容模式)"
+        SSL_TYPE="自签名证书 (IP 模式)"
+    fi
 fi
-read
 
 # ==================== 创建目录结构 ====================
 
-log_step "[2/8] 创建目录结构..."
+log_step "[3/8] 创建目录结构..."
 
 mkdir -p "$DOCKER_ROOT"
 mkdir -p "$SERVICE_DIR"
@@ -324,7 +478,7 @@ log_success "目录创建完成"
 
 # ==================== 生成 docker-compose.yml ====================
 
-log_step "[3/8] 生成 Docker Compose 配置..."
+log_step "[4/8] 生成 Docker Compose 配置..."
 
 if [ "$USE_POSTGRESQL" = true ]; then
     # PostgreSQL 配置
@@ -357,7 +511,7 @@ services:
     networks:
       - $DOCKER_NETWORK
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/status || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/status || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -439,7 +593,7 @@ services:
     networks:
       - $DOCKER_NETWORK
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/status || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/status || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -498,7 +652,7 @@ log_success "Docker Compose 配置已生成"
 
 # ==================== 拉取 Docker 镜像 ====================
 
-log_step "[4/8] 拉取 Docker 镜像..."
+log_step "[5/8] 拉取 Docker 镜像..."
 
 cd "$SERVICE_DIR"
 
@@ -512,7 +666,7 @@ fi
 
 # ==================== 启动服务 ====================
 
-log_step "[5/8] 启动 Docker 服务..."
+log_step "[6/8] 启动 Docker 服务..."
 
 log_info "正在启动容器..."
 if $COMPOSE_CMD up -d; then
@@ -533,124 +687,6 @@ if $COMPOSE_CMD ps | grep -q "Up"; then
 else
     log_warning "服务可能未正常启动，请检查日志"
     $COMPOSE_CMD ps
-fi
-
-# ==================== SSL 配置辅助函数 ====================
-
-# 获取主域名邮箱
-get_main_domain_email() {
-    local domain="$1"
-    local main_domain=$(echo "$domain" | awk -F. '{print $(NF-1)"."$NF}')
-    echo "admin@${main_domain}"
-}
-
-# 检查邮箱是否有效
-is_valid_ssl_email() {
-    local email="$1"
-    [ -z "$email" ] && return 1
-    echo "$email" | grep -qE "@(example\.com|localhost|test\.com)" && return 1
-    return 0
-}
-
-# 确保 acme.sh 配置正确
-ensure_acme_sh_config() {
-    local domain="$1"
-    local expected_email=$(get_main_domain_email "$domain")
-
-    if [ ! -f ~/.acme.sh/acme.sh ]; then
-        curl -s https://get.acme.sh | sh -s email="$expected_email" >/dev/null 2>&1
-        [ -f ~/.bashrc ] && source ~/.bashrc
-        return 0
-    fi
-
-    if [ -f ~/.acme.sh/account.conf ]; then
-        local current_email=$(grep "^ACCOUNT_EMAIL=" ~/.acme.sh/account.conf 2>/dev/null | cut -d"'" -f2)
-
-        if ! is_valid_ssl_email "$current_email"; then
-            sed -i "s/^ACCOUNT_EMAIL=.*/ACCOUNT_EMAIL='$expected_email'/g" ~/.acme.sh/account.conf
-            rm -rf ~/.acme.sh/ca/*/account.json 2>/dev/null || true
-        fi
-    fi
-}
-
-# ==================== SSL 证书配置 ====================
-
-log_step "[6/8] 配置 SSL 证书..."
-
-# 创建证书目录
-DOMAIN_SSL_DIR="$SSL_DIR/$DOMAIN"
-mkdir -p "$DOMAIN_SSL_DIR"
-
-if [ "$USE_HTTP_ONLY" = true ]; then
-    # HTTP 模式：跳过 SSL 证书
-    log_info "HTTP 模式，跳过 SSL 证书配置"
-    SSL_TYPE="无 (HTTP 模式)"
-elif [ "$USE_DOMAIN" = true ]; then
-    # 域名模式：申请 Let's Encrypt 证书
-    log_info "申请 Let's Encrypt ECC 证书..."
-
-    # 确保 acme.sh 配置正确
-    ensure_acme_sh_config "$DOMAIN"
-    [ -f ~/.bashrc ] && source ~/.bashrc
-
-    # 临时 Nginx 配置用于验证
-    cat > "$CONF_D/${DOMAIN}.conf" <<EOF
-server {
-    listen 80;
-    server_name $DOMAIN;
-    location /.well-known/acme-challenge/ {
-        root /var/www/acme;
-    }
-}
-EOF
-
-    mkdir -p /var/www/acme
-    chmod 755 /var/www/acme
-    systemctl reload nginx >/dev/null 2>&1
-
-    # 申请证书
-    ~/.acme.sh/acme.sh --issue --server letsencrypt -d "$DOMAIN" --webroot /var/www/acme --keylength ec-256
-
-    # 安装证书
-    ~/.acme.sh/acme.sh --install-cert -d "$DOMAIN" --ecc \
-        --key-file       "$DOMAIN_SSL_DIR/key.pem" \
-        --fullchain-file "$DOMAIN_SSL_DIR/fullchain.pem" \
-        --reloadcmd     "systemctl reload nginx" >/dev/null 2>&1
-
-    if [ $? -eq 0 ] && [ -f "$DOMAIN_SSL_DIR/fullchain.pem" ]; then
-        log_success "SSL 证书申请成功 (Let's Encrypt ECC)"
-        SSL_TYPE="Let's Encrypt (ECC-256)"
-    else
-        log_warning "SSL 申请失败，降级为自签名证书..."
-        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-            -keyout "$DOMAIN_SSL_DIR/key.pem" \
-            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
-            -subj "/CN=$DOMAIN" >/dev/null 2>&1
-        SSL_TYPE="自签名证书 (Let's Encrypt 申请失败)"
-    fi
-else
-    # IP 模式：生成自签名证书
-    log_info "生成自签名证书 (IP 模式)..."
-
-    # 生成支持 IP 的自签名证书
-    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-        -keyout "$DOMAIN_SSL_DIR/key.pem" \
-        -out "$DOMAIN_SSL_DIR/fullchain.pem" \
-        -subj "/CN=$DOMAIN" \
-        -addext "subjectAltName=IP:$DOMAIN" >/dev/null 2>&1
-
-    if [ $? -eq 0 ]; then
-        log_success "自签名证书生成成功"
-        SSL_TYPE="自签名证书 (IP 模式)"
-    else
-        # 旧版 OpenSSL 不支持 -addext，使用备用方法
-        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
-            -keyout "$DOMAIN_SSL_DIR/key.pem" \
-            -out "$DOMAIN_SSL_DIR/fullchain.pem" \
-            -subj "/CN=$DOMAIN" >/dev/null 2>&1
-        log_success "自签名证书生成成功 (兼容模式)"
-        SSL_TYPE="自签名证书 (IP 模式)"
-    fi
 fi
 
 # ==================== 配置 Nginx 反向代理 ====================
@@ -731,7 +767,7 @@ server {
     #SSL-START
     #HTTP_TO_HTTPS_START
     set $isRedcert 1;
-    if ($server_port != 443) {
+    if ($scheme = http) {
         set $isRedcert 2;
     }
     if ( $uri ~ /\.well-known/ ) {
@@ -801,7 +837,7 @@ server {
     #SSL-START
     #HTTP_TO_HTTPS_START
     set $isRedcert 1;
-    if ($server_port != 443) {
+    if ($scheme = http) {
         set $isRedcert 2;
     }
     if ( $uri ~ /\.well-known/ ) {
@@ -854,6 +890,11 @@ sed -i "s|DOMAIN_PLACEHOLDER|$DOMAIN|g" "$CONF_D/${DOMAIN}.conf"
 sed -i "s|SSL_CERT_PLACEHOLDER|$DOMAIN_SSL_DIR/fullchain.pem|g" "$CONF_D/${DOMAIN}.conf"
 sed -i "s|SSL_KEY_PLACEHOLDER|$DOMAIN_SSL_DIR/key.pem|g" "$CONF_D/${DOMAIN}.conf"
 sed -i "s|NEWAPI_PORT_PLACEHOLDER|$NEWAPI_PORT|g" "$CONF_D/${DOMAIN}.conf"
+
+HTTPS_LISTEN_SNIPPET="$NGINX_PATH/conf/snippets/https_listen.conf"
+if [ -f "$HTTPS_LISTEN_SNIPPET" ]; then
+    sed -i -E "s|^([[:space:]]*)listen 443 ssl;|\1include $HTTPS_LISTEN_SNIPPET;|" "$CONF_D/${DOMAIN}.conf"
+fi
 
 log_success "Nginx 配置已生成"
 
@@ -975,7 +1016,7 @@ log_success "配置信息已保存: $INFO_FILE"
 
 # ==================== 完成信息 ====================
 
-clear
+if [ "$INTERACTIVE" = "1" ]; then clear; fi
 echo -e "${GREEN}"
 cat "$INFO_FILE"
 echo -e "${NC}"

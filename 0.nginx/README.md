@@ -1,7 +1,7 @@
 # Nginx 1.28.1 部署指南（支持 HTTP/3）
 
 > **版本**: v4.0
-> **更新日期**: 2026-01-16
+> **更新日期**: 2026-10-30
 > **Nginx 版本**: 1.28.1（支持 HTTP/3 QUIC 协议）
 > **适用场景**: VPS 集群基础设施部署
 
@@ -24,6 +24,13 @@
 ## 项目简介
 
 本脚本是 VPS 集群项目的**基础设施组件**，为后续所有服务提供 Web 服务器和反向代理能力。
+
+### 与标准脚本对齐
+
+- **`install_nginx.sh`** 与本工作区 **`20260312_vps-manager/scripts/base/00_install_nginx.sh`** 同源维护；生成的主配置 `nginx.conf` 在 `http {}` 内含 **`map $http_upgrade $connection_upgrade`**，便于后续虚拟主机中的 WebSocket / SSE 反代（子站点需在 `location` 内按需设置 `Upgrade` / `Connection` 头）。
+- 主配置同时预置空的 `stream {}` 和 `snippets/https_listen.conf`。站点用 `include` 这段片段代替手写 `listen 443 ssl`，切换 443 占用方式时只改片段。
+- **`tools/nginx_sni_split.sh`**：`enable` 后公网 TCP 443 按 SNI 分流，网站改听 `127.0.0.1:8443`，Reality 可以和网站共用 443。`plan` 只预演，`disable` 恢复。逻辑与 vps-manager 的 `scripts/base/tools/nginx_sni_split.sh` 相同。
+- **可选**：若需禁止未知 Host 落到首个站点，可参考 **`tools/nginx_default_server_444.example.conf`**（占位证书路径，部署前替换 `REPLACE_ME`）。已开启分流的机器不要让它直接 `listen 443`，见该文件开头说明。
 
 ### 核心功能
 
@@ -408,7 +415,8 @@ cat /var/log/nginx/error.log
 # 示例: 添加 api.example.com
 cat > /usr/local/nginx/conf/conf.d/api.example.com.conf << 'EOF'
 server {
-    listen 443 ssl http2;
+    listen 443 ssl;
+    http2 on;
     server_name api.example.com;
 
     ssl_certificate /usr/local/nginx/conf/ssl/api.example.com/fullchain.pem;
@@ -418,6 +426,9 @@ server {
         proxy_pass http://127.0.0.1:3000;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
     }
 }
 EOF

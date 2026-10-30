@@ -1,7 +1,7 @@
 # VPS 集群部署工具
 
 > **版本**: v3.0
-> **更新日期**: 2026-02-23
+> **更新日期**: 2026-10-30
 > **许可证**: MIT
 
 一套 VPS 集群自动化部署工具，用于构建 AI API 网关服务和代理节点。
@@ -84,11 +84,21 @@ vps_deployment_ai_tools/
 │
 ├── 0.nginx/                       # Nginx 基础设施（必选）
 │   ├── install_nginx.sh
-│   └── README.md
+│   ├── README.md
+│   └── tools/
+│       ├── nginx_sni_split.sh              # TCP 443 按 SNI 分流
+│       └── nginx_default_server_444.example.conf
 │
 ├── 01.docker/                     # Docker 容器环境（推荐）
 │   ├── install_docker.sh
 │   └── README.md
+│
+├── 1.reality/                     # VLESS + Reality + Vision
+│   ├── install_reality.sh
+│   └── uninstall_reality.sh
+│
+├── 1.hysteria2/                   # Hysteria2（复用已有证书）
+│   └── install_hysteria2.sh
 │
 ├── 1.v2ray/                       # V2Ray 代理节点
 │   ├── install_v2ray.sh
@@ -125,6 +135,7 @@ vps_deployment_ai_tools/
 - 自动开启 TCP BBR，优化系统内核参数
 - 构建模块化配置结构 (conf.d/)
 - 编译 Stream 模块，支持四层代理
+- 预置 443 监听片段；`tools/nginx_sni_split.sh enable` 后可与 Reality 共用 TCP 443
 
 ```bash
 cd 0.nginx && ./install_nginx.sh
@@ -145,6 +156,31 @@ New-API 等 Docker 服务的前置依赖。
 
 ```bash
 cd 01.docker && ./install_docker.sh
+```
+
+---
+
+### 1.reality - VLESS + Reality + Vision
+
+> **依赖**: 无；与网站共用 443 时需先 `0.nginx/tools/nginx_sni_split.sh enable`
+
+- `MODE=standalone`（默认）独占端口；`MODE=nginx` 只听 `127.0.0.1:10443`，由 Nginx 按 SNI 接入
+- 默认伪装目标 `www.cisco.com`，环境变量驱动，`INTERACTIVE=1` 才提问
+
+```bash
+cd 1.reality && MODE=nginx ./install_reality.sh
+```
+
+---
+
+### 1.hysteria2 - Hysteria2
+
+> **依赖**: 已有 TLS 证书（`2.cliproxyapi/apply_ssl.sh` 或站点脚本签发）
+
+- 复用证书，不改 Nginx，默认 UDP 443。该端口已被 HTTP/3 占用时用 `HY2_PORT` 换端口
+
+```bash
+cd 1.hysteria2 && DOMAIN=example.com ./install_hysteria2.sh
 ```
 
 ---
@@ -170,9 +206,10 @@ cd 1.v2ray && ./install_v2ray.sh && ./install_web.sh
 - 轻量级 AI API 转发代理，资源占用极低（~50MB）
 - 支持 OpenAI、Claude、Gemini 等主流 AI 模型 API
 - 适合低配 VPS（内存 < 1GB）
+- 默认不提问：`DOMAIN` 必填，`ACCESS_MODE` 可选 domain/ip/http。Let's Encrypt 失败即中止，`ALLOW_SELF_SIGNED=1` 才退回自签名
 
 ```bash
-cd 2.cliproxyapi && ./install_cliproxyapi_v2.sh
+cd 2.cliproxyapi && DOMAIN=cpa.example.com ./install_cliproxyapi_v2.sh
 ```
 
 ---
@@ -185,9 +222,10 @@ cd 2.cliproxyapi && ./install_cliproxyapi_v2.sh
 - 支持 OpenAI、Claude、Gemini、Azure 等多种模型聚合
 - 完整的用户管理、令牌分组、计费系统
 - 技术栈：Docker Compose + PostgreSQL + Redis
+- 默认不提问：`DOMAIN` 必填，`DB` 可选 postgres/mysql。已安装时需 `FORCE=1` 才覆盖。证书失败规则与 CliproxyAPI 相同
 
 ```bash
-cd 3.new-api && ./install_newapi_docker.sh
+cd 3.new-api && DOMAIN=newapi.example.com ./install_newapi_docker.sh
 ```
 
 ---

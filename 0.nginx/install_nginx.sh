@@ -4,6 +4,9 @@
 #
 # Nginx 纯净安装与系统优化脚本
 #
+# 同源维护：与本工作区标准脚本 `20260312_vps-manager/scripts/base/00_install_nginx.sh`
+# 对齐；逻辑变更请先改标准脚本再同步至此文件。
+#
 # 功能说明：
 #   1. 系统内核优化：开启 BBR、优化 TCP 连接、提升文件描述符限制
 #   2. 编译安装 Nginx：仅包含必要模块 (SSL, V2, Stream, RealIP, StubStatus)
@@ -179,6 +182,12 @@ events {
 }
 
 http {
+    # WebSocket / SSE 透传
+    map \$http_upgrade \$connection_upgrade {
+        default upgrade;
+        ''      close;
+    }
+
     include       mime.types;
     default_type  application/octet-stream;
 
@@ -206,7 +215,23 @@ http {
     # 加载模块化配置 (关键点: 允许后续方便添加 API 站点)
     include $INSTALL_PATH/conf/conf.d/*.conf;
 }
+
+# TCP 443 按 SNI 分流 (0.nginx/tools/nginx_sni_split.sh enable 后生效; 目录为空时不监听任何端口)
+stream {
+    include $INSTALL_PATH/conf/stream.d/*.conf;
+}
 EOF
+
+# 站点用 include snippets/https_listen.conf 代替 listen 443 ssl, 切换 443 分流时只改这两个片段
+mkdir -p $INSTALL_PATH/conf/snippets $INSTALL_PATH/conf/stream.d/sni_map
+if [ ! -f $INSTALL_PATH/conf/snippets/https_listen.conf ]; then
+    printf '# 由 0.nginx/tools/nginx_sni_split.sh 维护, 模式: normal\nlisten 443 ssl;\n' \
+        > $INSTALL_PATH/conf/snippets/https_listen.conf
+fi
+if [ ! -f $INSTALL_PATH/conf/snippets/https_listen_default.conf ]; then
+    printf '# 由 0.nginx/tools/nginx_sni_split.sh 维护, 模式: normal\nlisten 443 ssl default_server;\n' \
+        > $INSTALL_PATH/conf/snippets/https_listen_default.conf
+fi
 
 # 创建 Systemd 服务
 cat > /etc/systemd/system/nginx.service <<EOF
